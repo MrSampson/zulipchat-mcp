@@ -1,9 +1,4 @@
-"""Alembic-driven schema migrations for the DuckDB backend.
-
-Only the migration step goes through SQLAlchemy/Alembic; DatabaseManager's
-regular query/execute hot path keeps using raw duckdb connections (that
-wholesale swap is a separate, later piece of work).
-"""
+"""Alembic-driven schema migrations for the DuckDB backend."""
 
 from __future__ import annotations
 
@@ -11,7 +6,8 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Connection, create_engine, text
+from sqlalchemy import Connection, Engine, create_engine, text
+from sqlalchemy.pool import NullPool
 
 INITIAL_REVISION = "0001"
 IN_MEMORY_DB_PATH = ":memory:"
@@ -19,17 +15,34 @@ IN_MEMORY_DB_PATH = ":memory:"
 _MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
-def _sqlalchemy_url(db_path: str) -> str:
-    # DuckDB's ":memory:" is a magic token, not a real path - resolving it
-    # would silently create a file literally named ":memory:" on disk.
+def sqlalchemy_url(db_path: str) -> str:
+    """Build the duckdb_engine URL for db_path.
+
+    DuckDB's ":memory:" is a magic token, not a real path - resolving it
+    would silently create a file literally named ":memory:" on disk.
+    """
     url_path = db_path if db_path == IN_MEMORY_DB_PATH else str(Path(db_path).resolve())
     return f"duckdb:///{url_path}"
+
+
+def make_engine(db_path: str) -> Engine:
+    """Build the shared duckdb_engine Engine for db_path.
+
+    NullPool means every checkout is a fresh connection - callers must
+    never hold a connection open longer than one call, so the file lock
+    is released for other processes sharing this DuckDB file.
+    """
+    return create_engine(
+        sqlalchemy_url(db_path),
+        poolclass=NullPool,
+        connect_args={"config": {"access_mode": "READ_WRITE"}},
+    )
 
 
 def _alembic_config(db_path: str) -> Config:
     cfg = Config()
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", _sqlalchemy_url(db_path))
+    cfg.set_main_option("sqlalchemy.url", sqlalchemy_url(db_path))
     return cfg
 
 
@@ -52,7 +65,7 @@ def _needs_legacy_stamp(db_path: str) -> bool:
     _run_migrations_with_retry already catches, instead of an unhandled
     duckdb.IOException bypassing that retry loop entirely.
     """
-    engine = create_engine(_sqlalchemy_url(db_path))
+    engine = make_engine(db_path)
     try:
         with engine.connect() as connection:
             if _table_exists(connection, "alembic_version"):
