@@ -6,7 +6,8 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Connection, create_engine, text
+from sqlalchemy import Connection, Engine, create_engine, text
+from sqlalchemy.pool import NullPool
 
 INITIAL_REVISION = "0001"
 IN_MEMORY_DB_PATH = ":memory:"
@@ -22,6 +23,20 @@ def sqlalchemy_url(db_path: str) -> str:
     """
     url_path = db_path if db_path == IN_MEMORY_DB_PATH else str(Path(db_path).resolve())
     return f"duckdb:///{url_path}"
+
+
+def make_engine(db_path: str) -> Engine:
+    """Build the shared duckdb_engine Engine for db_path.
+
+    NullPool means every checkout is a fresh connection - callers must
+    never hold a connection open longer than one call, so the file lock
+    is released for other processes sharing this DuckDB file.
+    """
+    return create_engine(
+        sqlalchemy_url(db_path),
+        poolclass=NullPool,
+        connect_args={"config": {"access_mode": "READ_WRITE"}},
+    )
 
 
 def _alembic_config(db_path: str) -> Config:
@@ -50,7 +65,7 @@ def _needs_legacy_stamp(db_path: str) -> bool:
     _run_migrations_with_retry already catches, instead of an unhandled
     duckdb.IOException bypassing that retry loop entirely.
     """
-    engine = create_engine(sqlalchemy_url(db_path))
+    engine = make_engine(db_path)
     try:
         with engine.connect() as connection:
             if _table_exists(connection, "alembic_version"):

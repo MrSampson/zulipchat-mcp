@@ -1,5 +1,6 @@
 """Tests for utils/database.py - short-lived connection pattern."""
 
+import os
 import subprocess
 import sys
 import time
@@ -18,12 +19,21 @@ from src.zulipchat_mcp.utils.database import (
 )
 from src.zulipchat_mcp.utils.migrations import IN_MEMORY_DB_PATH
 
-LOCK_ERROR = OperationalError(
-    "stmt", None, Exception("IO Error: Could not set lock on file")
-)
-NON_LOCK_OPERATIONAL_ERROR = OperationalError(
-    "stmt", None, Exception("Catalog Error: table already exists")
-)
+
+def _lock_error() -> OperationalError:
+    """A fresh instance each call - exceptions accumulate traceback/context
+    state when raised, so a single shared instance reused across many tests
+    (some raising it more than once) would carry stale state between them.
+    """
+    return OperationalError(
+        "stmt", None, Exception("IO Error: Could not set lock on file")
+    )
+
+
+def _non_lock_operational_error() -> OperationalError:
+    return OperationalError(
+        "stmt", None, Exception("Catalog Error: table already exists")
+    )
 
 
 def _mock_context_manager(return_value: MagicMock) -> MagicMock:
@@ -32,6 +42,19 @@ def _mock_context_manager(return_value: MagicMock) -> MagicMock:
     cm.__enter__.return_value = return_value
     cm.__exit__.return_value = False
     return cm
+
+
+def _hold_lock(db_path: str) -> subprocess.Popen:
+    """Start a subprocess that holds a real DuckDB write lock on db_path for
+    1.5s, so a test can prove real cross-process lock-contention retry.
+    """
+    holder_script = (
+        "import duckdb, time\n"
+        f"conn = duckdb.connect({db_path!r})\n"
+        'conn.execute("CREATE TABLE IF NOT EXISTS t(x INTEGER)")\n'
+        "time.sleep(1.5)\n"
+    )
+    return subprocess.Popen([sys.executable, "-c", holder_script])
 
 
 class TestDatabaseManager:
@@ -76,7 +99,7 @@ class TestDatabaseManager:
         with (
             patch(
                 "src.zulipchat_mcp.utils.database.run_migrations",
-                side_effect=[LOCK_ERROR, LOCK_ERROR, None],
+                side_effect=[_lock_error(), _lock_error(), None],
             ) as mock_run_migrations,
             patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False),
         ):
@@ -92,7 +115,7 @@ class TestDatabaseManager:
         with (
             patch(
                 "src.zulipchat_mcp.utils.database.run_migrations",
-                side_effect=LOCK_ERROR,
+                side_effect=_lock_error(),
             ) as mock_run_migrations,
             patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False),
         ):
@@ -111,7 +134,7 @@ class TestDatabaseManager:
         with (
             patch(
                 "src.zulipchat_mcp.utils.database.run_migrations",
-                side_effect=[LOCK_ERROR, None],
+                side_effect=[_lock_error(), None],
             ) as mock_run_migrations,
             patch.object(
                 DatabaseManager, "_try_clear_stale_lock", side_effect=[True]
@@ -136,7 +159,7 @@ class TestDatabaseManager:
         with (
             patch(
                 "src.zulipchat_mcp.utils.database.run_migrations",
-                side_effect=LOCK_ERROR,
+                side_effect=_lock_error(),
             ) as mock_run_migrations,
             patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=True),
         ):
@@ -152,13 +175,10 @@ class TestDatabaseManager:
         lock contention should ever become a DatabaseLockedError.
         """
         db_path = str(tmp_path / "test.db")
-        schema_error = OperationalError(
-            "stmt", None, Exception("Catalog Error: table already exists")
-        )
 
         with patch(
             "src.zulipchat_mcp.utils.database.run_migrations",
-            side_effect=schema_error,
+            side_effect=_non_lock_operational_error(),
         ) as mock_run_migrations:
             with pytest.raises(OperationalError, match="table already exists"):
                 DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
@@ -184,17 +204,29 @@ class TestDatabaseManager:
         db_path = str(tmp_path / "contended.db")
         duckdb.connect(db_path).close()  # file must exist before contending
 
-        holder_script = (
-            "import duckdb, time\n"
-            f"conn = duckdb.connect({db_path!r})\n"
-            'conn.execute("CREATE TABLE IF NOT EXISTS t(x INTEGER)")\n'
-            "time.sleep(1.5)\n"
-        )
-        holder = subprocess.Popen([sys.executable, "-c", holder_script])
+        holder = _hold_lock(db_path)
         try:
             time.sleep(0.3)  # let the holder acquire the lock first
             db = DatabaseManager(db_path, max_retries=10, retry_delay=0.2)
             assert db._initialized is True
+        finally:
+            holder.terminate()
+            holder.wait()
+
+    def test_execute_retries_through_real_cross_process_lock_contention(self, tmp_path):
+        """Same regression as the init test above, but for the shared
+        _with_lock_retry path used by execute()/query()/etc. once the
+        DatabaseManager is already up - proves the runtime hot path (not
+        just startup) survives genuine cross-process lock contention.
+        """
+        db_path = str(tmp_path / "contended.db")
+        db = DatabaseManager(db_path, max_retries=10, retry_delay=0.2)
+
+        holder = _hold_lock(db_path)
+        try:
+            time.sleep(0.3)  # let the holder acquire the lock first
+            db.execute("CREATE TABLE runtime_t (x INTEGER)")  # must retry, not crash
+            assert db.query("SELECT x FROM runtime_t") == []
         finally:
             holder.terminate()
             holder.wait()
@@ -227,8 +259,8 @@ class TestDatabaseManager:
         success_conn = MagicMock()
         mock_engine = MagicMock()
         mock_engine.begin.side_effect = [
-            LOCK_ERROR,
-            LOCK_ERROR,
+            _lock_error(),
+            _lock_error(),
             _mock_context_manager(success_conn),
         ]
         db._engine = mock_engine
@@ -248,7 +280,7 @@ class TestDatabaseManager:
         db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
 
         mock_engine = MagicMock()
-        mock_engine.begin.side_effect = LOCK_ERROR
+        mock_engine.begin.side_effect = _lock_error()
         db._engine = mock_engine
 
         with patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False):
@@ -266,7 +298,7 @@ class TestDatabaseManager:
         db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
 
         mock_engine = MagicMock()
-        mock_engine.begin.side_effect = NON_LOCK_OPERATIONAL_ERROR
+        mock_engine.begin.side_effect = _non_lock_operational_error()
         db._engine = mock_engine
 
         with pytest.raises(OperationalError, match="table already exists"):
@@ -279,7 +311,7 @@ class TestDatabaseManager:
         db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
 
         mock_engine = MagicMock()
-        mock_engine.connect.side_effect = NON_LOCK_OPERATIONAL_ERROR
+        mock_engine.connect.side_effect = _non_lock_operational_error()
         db._engine = mock_engine
 
         with pytest.raises(OperationalError, match="table already exists"):
@@ -331,8 +363,8 @@ class TestDatabaseManager:
         success_conn.exec_driver_sql.return_value = cursor
         mock_engine = MagicMock()
         mock_engine.connect.side_effect = [
-            LOCK_ERROR,
-            LOCK_ERROR,
+            _lock_error(),
+            _lock_error(),
             _mock_context_manager(success_conn),
         ]
         db._engine = mock_engine
@@ -396,6 +428,46 @@ class TestDatabaseManager:
         assert db._initialized is True
         db.execute("CREATE TABLE t (x INTEGER)")
         assert db.query("SELECT x FROM t") == []
+
+    def test_clear_stale_lock_removes_wal_when_holder_is_dead(
+        self, tmp_path, monkeypatch
+    ):
+        """_try_clear_stale_lock is fully mocked out by every test above (the
+        PID it must parse is unpredictable at record time) - test it
+        directly instead, with no mocking of the class under test.
+        """
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        wal_path = db.db_path + ".wal"
+        with open(wal_path, "w"):
+            pass
+
+        def fake_kill(pid, sig):
+            raise ProcessLookupError
+
+        monkeypatch.setattr(os, "kill", fake_kill)
+
+        cleared = db._try_clear_stale_lock(
+            Exception("Conflicting lock is held in /x (PID 424242)")
+        )
+
+        assert cleared is True
+        assert not os.path.exists(wal_path)
+
+    def test_clear_stale_lock_declines_when_holder_is_alive(self, tmp_path):
+        db = DatabaseManager(str(tmp_path / "test.db"))
+
+        cleared = db._try_clear_stale_lock(
+            Exception(f"Conflicting lock is held in /x (PID {os.getpid()})")
+        )
+
+        assert cleared is False
+
+    def test_clear_stale_lock_declines_when_message_has_no_pid(self, tmp_path):
+        db = DatabaseManager(str(tmp_path / "test.db"))
+
+        cleared = db._try_clear_stale_lock(Exception("IO Error: disk full"))
+
+        assert cleared is False
 
     def test_global_instances(self):
         """Test global instance helpers."""
