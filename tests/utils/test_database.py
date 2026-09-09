@@ -15,6 +15,7 @@ from src.zulipchat_mcp.utils.database import (
     get_database,
     init_database,
 )
+from src.zulipchat_mcp.utils.migrations import IN_MEMORY_DB_PATH
 
 
 class TestDatabaseManager:
@@ -95,6 +96,56 @@ class TestDatabaseManager:
 
         assert mock_run_migrations.call_count == 3
 
+    def test_init_stale_lock_cleared_then_succeeds(self, tmp_path):
+        """Test the _try_clear_stale_lock == True branch: a lock held by a
+        dead process gets cleared and the next attempt succeeds immediately,
+        without going through the sleep-and-retry branch.
+        """
+        db_path = str(tmp_path / "test.db")
+        lock_error = OperationalError(
+            "stmt", None, Exception("IO Error: Could not set lock on file")
+        )
+
+        with (
+            patch(
+                "src.zulipchat_mcp.utils.database.run_migrations",
+                side_effect=[lock_error, None],
+            ) as mock_run_migrations,
+            patch.object(
+                DatabaseManager, "_try_clear_stale_lock", side_effect=[True]
+            ) as mock_clear_stale_lock,
+        ):
+            db = DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
+
+        assert db._initialized is True
+        assert mock_run_migrations.call_count == 2
+        mock_clear_stale_lock.assert_called_once()
+
+    def test_init_stale_lock_repeatedly_detected_still_exhausts_retries(self, tmp_path):
+        """Test the post-loop DatabaseLockedError fallthrough: if
+        _try_clear_stale_lock keeps returning True, the retry loop never
+        takes the in-loop 'raise DatabaseLockedError' branch (only reached
+        when it returns False) - it just keeps retrying immediately until
+        max_retries is exhausted, falling through to the loop's own
+        DatabaseLockedError after the for loop ends.
+        """
+        db_path = str(tmp_path / "test.db")
+        lock_error = OperationalError(
+            "stmt", None, Exception("IO Error: Could not set lock on file")
+        )
+
+        with (
+            patch(
+                "src.zulipchat_mcp.utils.database.run_migrations",
+                side_effect=lock_error,
+            ) as mock_run_migrations,
+            patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=True),
+        ):
+            with pytest.raises(DatabaseLockedError, match="Database is locked"):
+                DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
+
+        assert mock_run_migrations.call_count == 3
+
     def test_init_reraises_non_lock_operational_error_unmangled(self, tmp_path):
         """A genuine migration failure (e.g. a real DDL/schema bug) must
         propagate as itself, not get relabeled as DatabaseLockedError just
@@ -116,18 +167,20 @@ class TestDatabaseManager:
         # Not a lock problem, so it must not have been retried.
         assert mock_run_migrations.call_count == 1
 
-    @pytest.mark.slow
     def test_init_retries_through_real_cross_process_lock_contention(self, tmp_path):
-        """Regression test for a real (unmocked) lock, not the mocked
-        run_migrations used above.
+        """Regression test using a real (unmocked) lock from another OS
+        process, not the mocked run_migrations used above.
 
-        _needs_legacy_stamp (utils/migrations.py) opens its own raw
-        duckdb.connect() to check for the old schema_migrations table,
-        separately from the SQLAlchemy engine Alembic itself uses. If that
-        raw connection ever raises duckdb.IOException instead of the
-        sqlalchemy.exc.OperationalError the rest of run_migrations raises,
-        it must still be caught here - _run_migrations_with_retry existing
-        to retry lock contention is the whole point of this test.
+        _needs_legacy_stamp (utils/migrations.py) goes through the same
+        SQLAlchemy/duckdb_engine connection as the rest of run_migrations,
+        so lock contention there surfaces as the same retriable
+        sqlalchemy.exc.OperationalError. This test proves that end-to-end
+        against a genuinely locked file, not a mock: it previously caught a
+        real bug where that check used a separate raw duckdb connection
+        whose duckdb.IOException bypassed _run_migrations_with_retry's
+        except clause entirely and crashed startup instead of retrying. A
+        regression back to a raw connection there would fail this test the
+        same way.
         """
         db_path = str(tmp_path / "contended.db")
         duckdb.connect(db_path).close()  # file must exist before contending
@@ -308,12 +361,12 @@ class TestDatabaseManager:
 
     def test_global_instances(self, mock_duckdb):
         """Test global instance helpers."""
-        db = init_database(":memory:")
+        db = init_database(IN_MEMORY_DB_PATH)
         assert db is not None
 
         db2 = get_database()
         assert db2 is db
 
         # Verify calling DatabaseManager() directly also returns the same instance
-        db3 = DatabaseManager(":memory:")
+        db3 = DatabaseManager(IN_MEMORY_DB_PATH)
         assert db3 is db

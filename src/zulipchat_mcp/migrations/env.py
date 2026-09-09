@@ -47,10 +47,11 @@ def run_migrations_online() -> None:
     connectable = create_engine(url, poolclass=pool.NullPool)
     try:
         with connectable.connect() as connection:
+            # compare_type would only matter for --autogenerate, which
+            # doesn't work against duckdb_engine 0.17.0 (see alembic.ini).
             context.configure(
                 connection=connection,
                 target_metadata=target_metadata,
-                compare_type=True,
             )
             with context.begin_transaction():
                 context.run_migrations()

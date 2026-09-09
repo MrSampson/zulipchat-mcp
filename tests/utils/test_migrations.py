@@ -8,9 +8,15 @@ brand new database file, and one already created by the old hand-rolled
 from pathlib import Path
 
 import duckdb
+import pytest
+from alembic import command
 from sqlalchemy import create_engine
 
-from src.zulipchat_mcp.utils.migrations import IN_MEMORY_DB_PATH, run_migrations
+from src.zulipchat_mcp.utils.migrations import (
+    IN_MEMORY_DB_PATH,
+    _alembic_config,
+    run_migrations,
+)
 from src.zulipchat_mcp.utils.schema import metadata
 
 _REAL_TABLES = metadata.sorted_tables
@@ -119,3 +125,31 @@ def test_legacy_pre_alembic_database_is_stamped_not_replayed(tmp_path: Path) -> 
     run_migrations(db_path)  # must not raise
 
     assert _alembic_version(db_path) == "0001"
+
+
+def test_offline_mode_generates_sql_without_touching_the_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """run_migrations() (production's only entry point) never uses offline
+    mode - it's a dev-only path documented in alembic.ini as how to see the
+    exact DDL to transcribe into a new hand-written revision (`alembic
+    upgrade head --sql`). Prove it actually works rather than leaving it
+    silently untested and unused.
+    """
+    db_path = str(tmp_path / "offline_probe.duckdb")
+    cfg = _alembic_config(db_path)
+
+    command.upgrade(cfg, "head", sql=True)
+
+    generated_sql = capsys.readouterr().out
+    assert "CREATE TABLE afk_state" in generated_sql
+    assert not Path(db_path).exists()
+
+
+def test_downgrade_from_head_drops_every_real_table(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "fresh.duckdb")
+    run_migrations(db_path)
+
+    command.downgrade(_alembic_config(db_path), "base")
+
+    assert _table_names(db_path).isdisjoint(_REAL_TABLE_NAMES)

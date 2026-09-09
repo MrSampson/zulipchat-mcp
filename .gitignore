@@ -201,6 +201,7 @@ config.json
 .zulipchat-mcp.json
 .mcp.json
 .mcp/
+alembic_dev.duckdb
 
 # Claude Code workspace files
 .claude/

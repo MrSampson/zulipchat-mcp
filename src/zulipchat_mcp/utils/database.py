@@ -68,13 +68,7 @@ class DatabaseManager:
         self._write_lock = threading.RLock()  # Thread safety within process
         self._initialized: bool = False
 
-        # run_migrations() also creates this directory itself (it must stay
-        # self-sufficient - callers use it directly in tests), so this is
-        # redundant when going through DatabaseManager. Harmless: exist_ok=True.
-        dirname = os.path.dirname(db_path)
-        if dirname:
-            os.makedirs(dirname, exist_ok=True)
-
+        # run_migrations() creates db_path's parent directory itself.
         self._run_migrations_with_retry()
         self._initialized = True
 
@@ -82,7 +76,7 @@ class DatabaseManager:
         """Create a new database connection."""
         return duckdb.connect(self.db_path, config={"access_mode": "READ_WRITE"})
 
-    def _try_clear_stale_lock(self, error: Exception) -> bool:
+    def _try_clear_stale_lock(self, error: BaseException) -> bool:
         """Check if the lock is held by a dead process and clear it if so.
 
         DuckDB error messages include the locking PID, e.g.:
@@ -141,10 +135,14 @@ class DatabaseManager:
                 run_migrations(self.db_path)
                 return
             except OperationalError as e:
-                if "lock" not in str(e).lower():
+                # e.orig is the underlying duckdb exception's precise
+                # message; str(e) also includes the SQL statement and a
+                # sqlalche.me URL, which could coincidentally contain "lock".
+                original = e.orig if e.orig is not None else e
+                if "lock" not in str(original).lower():
                     raise
                 last_error = e
-                if self._try_clear_stale_lock(e):
+                if self._try_clear_stale_lock(original):
                     continue  # Retry immediately after clearing stale lock
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay * (2**attempt))

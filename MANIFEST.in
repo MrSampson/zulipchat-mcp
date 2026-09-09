@@ -12,6 +12,7 @@ include pyproject.toml
 # Include source code
 recursive-include src *.py
 recursive-include src *.pyi
+recursive-include src *.mako
 recursive-include integrations *.md
 recursive-include integrations *.json
 recursive-include integrations *.jsonc

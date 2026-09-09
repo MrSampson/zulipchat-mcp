@@ -75,9 +75,7 @@ def run_migrations(db_path: str) -> None:
     stamped at the initial revision instead of replaying its DDL).
     """
     if db_path != IN_MEMORY_DB_PATH:
-        dirname = Path(db_path).parent
-        if str(dirname):
-            dirname.mkdir(parents=True, exist_ok=True)
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
     cfg = _alembic_config(db_path)
     if _needs_legacy_stamp(db_path):
