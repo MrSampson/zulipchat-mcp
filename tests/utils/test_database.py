@@ -21,6 +21,9 @@ from src.zulipchat_mcp.utils.migrations import IN_MEMORY_DB_PATH
 LOCK_ERROR = OperationalError(
     "stmt", None, Exception("IO Error: Could not set lock on file")
 )
+NON_LOCK_OPERATIONAL_ERROR = OperationalError(
+    "stmt", None, Exception("Catalog Error: table already exists")
+)
 
 
 def _mock_context_manager(return_value: MagicMock) -> MagicMock:
@@ -253,6 +256,36 @@ class TestDatabaseManager:
                 db.execute("INSERT INTO t VALUES (?)", [1])
 
         assert mock_engine.begin.call_count == 3
+
+    def test_execute_reraises_non_lock_operational_error_unmangled(self, tmp_path):
+        """A genuine non-lock OperationalError (e.g. a real schema bug) must
+        propagate as itself, not get relabeled as DatabaseLockedError and not
+        get retried - mirrors test_init_reraises_non_lock_operational_error_
+        unmangled, but for the execute() retry loop instead of init's.
+        """
+        db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
+
+        mock_engine = MagicMock()
+        mock_engine.begin.side_effect = NON_LOCK_OPERATIONAL_ERROR
+        db._engine = mock_engine
+
+        with pytest.raises(OperationalError, match="table already exists"):
+            db.execute("INSERT INTO t VALUES (?)", [1])
+
+        assert mock_engine.begin.call_count == 1
+
+    def test_query_reraises_non_lock_operational_error_unmangled(self, tmp_path):
+        """Same invariant as above, for the query() retry loop."""
+        db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
+
+        mock_engine = MagicMock()
+        mock_engine.connect.side_effect = NON_LOCK_OPERATIONAL_ERROR
+        db._engine = mock_engine
+
+        with pytest.raises(OperationalError, match="table already exists"):
+            db.query("SELECT *")
+
+        assert mock_engine.connect.call_count == 1
 
     def test_executemany_inserts_all_rows(self, tmp_path):
         """executemany() writes every row in a single transaction."""
