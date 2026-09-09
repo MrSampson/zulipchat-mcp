@@ -68,11 +68,13 @@ class DatabaseManager:
         self._write_lock = threading.RLock()  # Thread safety within process
         self._initialized: bool = False
 
+        # run_migrations() also creates this directory itself (it must stay
+        # self-sufficient - callers use it directly in tests), so this is
+        # redundant when going through DatabaseManager. Harmless: exist_ok=True.
         dirname = os.path.dirname(db_path)
         if dirname:
             os.makedirs(dirname, exist_ok=True)
 
-        # Run migrations using short-lived connection
         self._run_migrations_with_retry()
         self._initialized = True
 
@@ -126,6 +128,12 @@ class DatabaseManager:
         OperationalError (wrapping the underlying duckdb.IOException) - not
         the duckdb.IOException the other short-lived-connection methods
         below catch directly.
+
+        Only OperationalErrors that actually look like lock contention get
+        retried/relabeled as DatabaseLockedError. A genuine migration
+        failure (a real DDL/schema bug, for instance) is also an
+        OperationalError but must propagate as itself - mislabeling it as
+        "Database is locked" would send debugging down the wrong path.
         """
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
@@ -133,13 +141,14 @@ class DatabaseManager:
                 run_migrations(self.db_path)
                 return
             except OperationalError as e:
+                if "lock" not in str(e).lower():
+                    raise
                 last_error = e
-                if "lock" in str(e).lower():
-                    if self._try_clear_stale_lock(e):
-                        continue  # Retry immediately after clearing stale lock
-                    if attempt < self.max_retries - 1:
-                        time.sleep(self.retry_delay * (2**attempt))
-                        continue
+                if self._try_clear_stale_lock(e):
+                    continue  # Retry immediately after clearing stale lock
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (2**attempt))
+                    continue
                 raise DatabaseLockedError(self.db_path, e) from e
 
         if last_error:

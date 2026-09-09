@@ -10,7 +10,7 @@ from pathlib import Path
 import duckdb
 from sqlalchemy import create_engine
 
-from src.zulipchat_mcp.utils.migrations import run_migrations
+from src.zulipchat_mcp.utils.migrations import IN_MEMORY_DB_PATH, run_migrations
 from src.zulipchat_mcp.utils.schema import metadata
 
 _REAL_TABLES = metadata.sorted_tables
@@ -67,9 +67,9 @@ def test_in_memory_database_does_not_leak_a_literal_memory_file_to_disk(
     """
     monkeypatch.chdir(tmp_path)
 
-    run_migrations(":memory:")
+    run_migrations(IN_MEMORY_DB_PATH)
 
-    assert not (tmp_path / ":memory:").exists()
+    assert not (tmp_path / IN_MEMORY_DB_PATH).exists()
 
 
 def test_fresh_database_creates_all_real_tables(tmp_path: Path) -> None:

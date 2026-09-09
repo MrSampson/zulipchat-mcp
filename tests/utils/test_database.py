@@ -1,5 +1,8 @@
 """Tests for utils/database.py - short-lived connection pattern."""
 
+import subprocess
+import sys
+import time
 from unittest.mock import MagicMock, call, patch
 
 import duckdb
@@ -91,6 +94,58 @@ class TestDatabaseManager:
                 DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
 
         assert mock_run_migrations.call_count == 3
+
+    def test_init_reraises_non_lock_operational_error_unmangled(self, tmp_path):
+        """A genuine migration failure (e.g. a real DDL/schema bug) must
+        propagate as itself, not get relabeled as DatabaseLockedError just
+        because it happens to be a sqlalchemy.exc.OperationalError. Only
+        lock contention should ever become a DatabaseLockedError.
+        """
+        db_path = str(tmp_path / "test.db")
+        schema_error = OperationalError(
+            "stmt", None, Exception("Catalog Error: table already exists")
+        )
+
+        with patch(
+            "src.zulipchat_mcp.utils.database.run_migrations",
+            side_effect=schema_error,
+        ) as mock_run_migrations:
+            with pytest.raises(OperationalError, match="table already exists"):
+                DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
+
+        # Not a lock problem, so it must not have been retried.
+        assert mock_run_migrations.call_count == 1
+
+    @pytest.mark.slow
+    def test_init_retries_through_real_cross_process_lock_contention(self, tmp_path):
+        """Regression test for a real (unmocked) lock, not the mocked
+        run_migrations used above.
+
+        _needs_legacy_stamp (utils/migrations.py) opens its own raw
+        duckdb.connect() to check for the old schema_migrations table,
+        separately from the SQLAlchemy engine Alembic itself uses. If that
+        raw connection ever raises duckdb.IOException instead of the
+        sqlalchemy.exc.OperationalError the rest of run_migrations raises,
+        it must still be caught here - _run_migrations_with_retry existing
+        to retry lock contention is the whole point of this test.
+        """
+        db_path = str(tmp_path / "contended.db")
+        duckdb.connect(db_path).close()  # file must exist before contending
+
+        holder_script = (
+            "import duckdb, time\n"
+            f"conn = duckdb.connect({db_path!r})\n"
+            'conn.execute("CREATE TABLE IF NOT EXISTS t(x INTEGER)")\n'
+            "time.sleep(1.5)\n"
+        )
+        holder = subprocess.Popen([sys.executable, "-c", holder_script])
+        try:
+            time.sleep(0.3)  # let the holder acquire the lock first
+            db = DatabaseManager(db_path, max_retries=10, retry_delay=0.2)
+            assert db._initialized is True
+        finally:
+            holder.terminate()
+            holder.wait()
 
     def test_execute_opens_closes_connection(self, mock_duckdb, tmp_path):
         """Test execute opens and closes connection for each operation."""

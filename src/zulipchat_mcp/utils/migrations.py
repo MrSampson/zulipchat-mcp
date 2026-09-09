@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import duckdb
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import Connection, create_engine, text
 
 INITIAL_REVISION = "0001"
 IN_MEMORY_DB_PATH = ":memory:"
@@ -19,20 +19,24 @@ IN_MEMORY_DB_PATH = ":memory:"
 _MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
-def _alembic_config(db_path: str) -> Config:
+def _sqlalchemy_url(db_path: str) -> str:
     # DuckDB's ":memory:" is a magic token, not a real path - resolving it
     # would silently create a file literally named ":memory:" on disk.
     url_path = db_path if db_path == IN_MEMORY_DB_PATH else str(Path(db_path).resolve())
+    return f"duckdb:///{url_path}"
+
+
+def _alembic_config(db_path: str) -> Config:
     cfg = Config()
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", f"duckdb:///{url_path}")
+    cfg.set_main_option("sqlalchemy.url", _sqlalchemy_url(db_path))
     return cfg
 
 
-def _table_exists(conn: duckdb.DuckDBPyConnection, table_name: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = ?",
-        [table_name],
+def _table_exists(connection: Connection, table_name: str) -> bool:
+    row = connection.execute(
+        text("SELECT 1 FROM information_schema.tables WHERE table_name = :name"),
+        {"name": table_name},
     ).fetchone()
     return row is not None
 
@@ -41,19 +45,26 @@ def _needs_legacy_stamp(db_path: str) -> bool:
     """True if this is a database from the pre-Alembic hand-rolled migrator:
     it already has all the real tables (tracked via its own schema_migrations
     table at version 1) but no alembic_version table yet.
+
+    Goes through the same SQLAlchemy/duckdb_engine path as the rest of
+    run_migrations (rather than a raw duckdb connection) so lock contention
+    here surfaces as the same sqlalchemy.exc.OperationalError
+    _run_migrations_with_retry already catches, instead of an unhandled
+    duckdb.IOException bypassing that retry loop entirely.
     """
-    conn = duckdb.connect(db_path)
+    engine = create_engine(_sqlalchemy_url(db_path))
     try:
-        if _table_exists(conn, "alembic_version"):
-            return False
-        if not _table_exists(conn, "schema_migrations"):
-            return False
-        row = conn.execute(
-            "SELECT version FROM schema_migrations WHERE version = 1"
-        ).fetchone()
-        return row is not None
+        with engine.connect() as connection:
+            if _table_exists(connection, "alembic_version"):
+                return False
+            if not _table_exists(connection, "schema_migrations"):
+                return False
+            row = connection.execute(
+                text("SELECT version FROM schema_migrations WHERE version = 1")
+            ).fetchone()
+            return row is not None
     finally:
-        conn.close()
+        engine.dispose()
 
 
 def run_migrations(db_path: str) -> None:
