@@ -4,6 +4,12 @@ Mirrors the hand-written DDL executed by ``DatabaseManager._run_migrations`` in
 ``database.py``. This module defines the schema only; nothing in the runtime
 code path consumes it yet. It is the shared source of truth that both the
 DuckDB backend (duckdb_engine) and the future Postgres backend will build on.
+
+All ``DateTime`` columns here are timezone-naive (matching the hand-written
+DDL, and DuckDB's own naive TIMESTAMP), even though database.py writes
+``datetime.now(timezone.utc)`` into them. Postgres's ``TIMESTAMP WITHOUT TIME
+ZONE`` will inherit the same naive/aware mismatch - a decision to make in
+issue #4 (Add PostgreSQL backend), not a bug in this extraction.
 """
 
 from sqlalchemy import (
@@ -15,6 +21,7 @@ from sqlalchemy import (
     MetaData,
     Table,
     Text,
+    text,
 )
 
 metadata = MetaData()
@@ -120,13 +127,13 @@ agent_events = Table(
     Column("sender_email", Text),
     Column("content", Text),
     Column("created_at", DateTime),
-    Column("acked", Boolean, server_default="FALSE"),
+    Column("acked", Boolean, server_default=text("FALSE")),
 )
 
 listener_state = Table(
     "listener_state",
     metadata,
-    Column("id", Integer, primary_key=True, server_default="1"),
+    Column("id", Integer, primary_key=True, server_default=text("1")),
     Column("queue_id", Text),
     Column("last_event_id", Integer),
     Column("updated_at", DateTime, nullable=False),
@@ -201,5 +208,5 @@ session_events = Table(
     Column("request_id", Text),
     Column("metadata", Text),
     Column("created_at", DateTime, nullable=False),
-    Column("acked", Boolean, server_default="FALSE"),
+    Column("acked", Boolean, server_default=text("FALSE")),
 )

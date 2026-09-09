@@ -5,8 +5,12 @@ database.py exactly: same tables, same columns, same nullability, same primary
 keys, same foreign keys. No behavior change - nothing consumes this schema yet.
 """
 
-from sqlalchemy import Boolean, DateTime, Integer, Table, Text
+from pathlib import Path
 
+import duckdb
+from sqlalchemy import Boolean, DateTime, DefaultClause, Integer, Table, Text
+
+from src.zulipchat_mcp.utils.database import DatabaseManager
 from src.zulipchat_mcp.utils.schema import metadata
 
 EXPECTED_TABLES: dict[str, dict[str, object]] = {
@@ -278,8 +282,10 @@ class TestTableShapes:
     def test_column_names(self) -> None:
         for table_name, spec in EXPECTED_TABLES.items():
             table = metadata.tables[table_name]
+            columns = spec["columns"]
+            assert isinstance(columns, dict)
             actual = set(table.columns.keys())
-            expected = set(spec["columns"].keys())  # type: ignore[union-attr]
+            expected = set(columns.keys())
             assert actual == expected, f"{table_name}: {actual} != {expected}"
 
     def test_column_types(self) -> None:
@@ -289,9 +295,12 @@ class TestTableShapes:
             assert isinstance(columns, dict)
             for column_name, expected_type in columns.items():
                 actual_type = table.c[column_name].type
-                assert isinstance(actual_type, expected_type), (
+                # Exact type, not isinstance: a subclass like BigInteger would
+                # otherwise silently pass an Integer check despite being a
+                # different DDL type (BIGINT vs INTEGER).
+                assert type(actual_type) is expected_type, (
                     f"{table_name}.{column_name}: {actual_type!r} is not "
-                    f"{expected_type.__name__}"
+                    f"exactly {expected_type.__name__}"
                 )
 
     def test_server_defaults(self) -> None:
@@ -307,12 +316,13 @@ class TestTableShapes:
                         f"{column.server_default!r}"
                     )
                 else:
-                    assert (
-                        column.server_default is not None
+                    server_default = column.server_default
+                    assert isinstance(
+                        server_default, DefaultClause
                     ), f"{table_name}.{column.name}: missing server_default"
-                    assert str(column.server_default.arg) == expected, (
+                    assert str(server_default.arg) == expected, (
                         f"{table_name}.{column.name}: "
-                        f"{column.server_default.arg!r} != {expected!r}"
+                        f"{server_default.arg!r} != {expected!r}"
                     )
 
     def test_not_null_columns(self) -> None:
@@ -335,3 +345,49 @@ class TestTableShapes:
             table = metadata.tables[table_name]
             actual = _foreign_keys_by_column(table)
             assert actual == spec["foreign_keys"], f"{table_name}: {actual}"
+
+
+# DuckDB's catalog reports its own native type names, not what SQLAlchemy's
+# generic dialect would compile them to (e.g. Text() compiles generically to
+# "TEXT", but DuckDB's catalog reports "VARCHAR"). duckdb_engine - added in
+# issue #3 - will handle this properly via a real dialect; hand-mapped here
+# since nothing wires schema.py to a DuckDB SQLAlchemy dialect yet.
+_DUCKDB_CATALOG_TYPE_NAME: dict[type, str] = {
+    Integer: "INTEGER",
+    Text: "VARCHAR",
+    Boolean: "BOOLEAN",
+    DateTime: "TIMESTAMP",
+}
+
+
+def test_schema_matches_the_ddl_database_py_actually_executes(tmp_path: Path) -> None:
+    """schema.py mirrors the real DDL DatabaseManager runs - not just EXPECTED_TABLES,
+    which is itself hand-transcribed from schema.py and can't catch a transcription
+    error made identically in both places.
+    """
+    db_path = str(tmp_path / "schema_check.duckdb")
+    DatabaseManager._instance = None
+    DatabaseManager(db_path)
+    DatabaseManager._instance = None
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        for table_name, table in metadata.tables.items():
+            rows = conn.execute(
+                "SELECT column_name, data_type, is_nullable FROM duckdb_columns() "
+                "WHERE table_name = ? ORDER BY column_index",
+                [table_name],
+            ).fetchall()
+            assert rows, f"{table_name} is missing from the DDL database.py executes"
+
+            expected_names = [c.name for c in table.columns]
+            expected_types = [
+                _DUCKDB_CATALOG_TYPE_NAME[type(c.type)] for c in table.columns
+            ]
+            expected_nullable = [c.nullable for c in table.columns]
+
+            assert [r[0] for r in rows] == expected_names, table_name
+            assert [r[1] for r in rows] == expected_types, table_name
+            assert [bool(r[2]) for r in rows] == expected_nullable, table_name
+    finally:
+        conn.close()
