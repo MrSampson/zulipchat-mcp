@@ -142,8 +142,12 @@ class DatabaseManager:
                 if "lock" not in str(original).lower():
                     raise
                 last_error = e
+                # No backoff here (unlike the branch below): a stale lock
+                # from a dead process is already gone, so there's nothing
+                # to wait out - retrying immediately is deliberate, not a
+                # missing sleep. Same pattern in the other retry loops below.
                 if self._try_clear_stale_lock(original):
-                    continue  # Retry immediately after clearing stale lock
+                    continue
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay * (2**attempt))
                     continue
