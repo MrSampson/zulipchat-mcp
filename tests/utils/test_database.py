@@ -186,6 +186,7 @@ class TestDatabaseManager:
         # Not a lock problem, so it must not have been retried.
         assert mock_run_migrations.call_count == 1
 
+    @pytest.mark.slow
     def test_init_retries_through_real_cross_process_lock_contention(self, tmp_path):
         """Regression test using a real (unmocked) lock from another OS
         process, not the mocked run_migrations used above.
@@ -200,6 +201,10 @@ class TestDatabaseManager:
         except clause entirely and crashed startup instead of retrying. A
         regression back to a raw connection there would fail this test the
         same way.
+
+        The elapsed-time assertion proves contention actually happened -
+        without it, this would pass identically if the holder never
+        acquired the lock in time, silently decaying into a no-op test.
         """
         db_path = str(tmp_path / "contended.db")
         duckdb.connect(db_path).close()  # file must exist before contending
@@ -207,12 +212,15 @@ class TestDatabaseManager:
         holder = _hold_lock(db_path)
         try:
             time.sleep(0.3)  # let the holder acquire the lock first
+            start = time.monotonic()
             db = DatabaseManager(db_path, max_retries=10, retry_delay=0.2)
             assert db._initialized is True
+            assert time.monotonic() - start > 0.5, "expected to block on the holder"
         finally:
             holder.terminate()
             holder.wait()
 
+    @pytest.mark.slow
     def test_execute_retries_through_real_cross_process_lock_contention(self, tmp_path):
         """Same regression as the init test above, but for the shared
         _with_lock_retry path used by execute()/query()/etc. once the
@@ -225,7 +233,9 @@ class TestDatabaseManager:
         holder = _hold_lock(db_path)
         try:
             time.sleep(0.3)  # let the holder acquire the lock first
+            start = time.monotonic()
             db.execute("CREATE TABLE runtime_t (x INTEGER)")  # must retry, not crash
+            assert time.monotonic() - start > 0.5, "expected to block on the holder"
             assert db.query("SELECT x FROM runtime_t") == []
         finally:
             holder.terminate()
@@ -325,6 +335,20 @@ class TestDatabaseManager:
         db.execute("CREATE TABLE t (x INTEGER)")
 
         db.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+
+        assert db.query("SELECT x FROM t ORDER BY x") == [(1,), (2,)]
+
+    def test_executemany_accepts_list_shaped_rows(self, tmp_path):
+        """SQLAlchemy's parameter distiller rejects a bare list per row
+        (only tuples/dicts), unlike the pre-refactor raw duckdb.connect()
+        which accepted either - each row must be coerced to a tuple before
+        reaching exec_driver_sql. execute()/query() already accept
+        list-shaped single-row params; this pins the same for executemany().
+        """
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (x INTEGER)")
+
+        db.executemany("INSERT INTO t VALUES (?)", [[1], [2]])
 
         assert db.query("SELECT x FROM t ORDER BY x") == [(1,), (2,)]
 
@@ -452,6 +476,26 @@ class TestDatabaseManager:
 
         assert cleared is True
         assert not os.path.exists(wal_path)
+
+    def test_clear_stale_lock_clears_when_holder_is_dead_and_no_wal_present(
+        self, tmp_path, monkeypatch
+    ):
+        """The no-WAL-file branch: DuckDB can hold a lock with no .wal on
+        disk, and that's still a stale-lock-cleared case, not a decline.
+        """
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        assert not os.path.exists(db.db_path + ".wal")
+
+        def fake_kill(pid, sig):
+            raise ProcessLookupError
+
+        monkeypatch.setattr(os, "kill", fake_kill)
+
+        cleared = db._try_clear_stale_lock(
+            Exception("Conflicting lock is held in /x (PID 424242)")
+        )
+
+        assert cleared is True
 
     def test_clear_stale_lock_declines_when_holder_is_alive(self, tmp_path):
         db = DatabaseManager(str(tmp_path / "test.db"))

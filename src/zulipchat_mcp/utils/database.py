@@ -15,7 +15,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
 from sqlalchemy import Engine
@@ -119,7 +119,7 @@ class DatabaseManager:
             logger.info(f"Locking process (PID {pid}) is dead; retrying connect")
         return True
 
-    def _is_retriable_lock_error(self, error: OperationalError) -> BaseException:
+    def _unwrap_lock_error_or_raise(self, error: OperationalError) -> BaseException:
         """Return the unwrapped original error if `error` looks like lock
         contention, else re-raise `error` unmangled (a genuine non-lock
         OperationalError, e.g. a real schema bug, must propagate as itself).
@@ -148,7 +148,7 @@ class DatabaseManager:
                 return operation()
             except OperationalError as e:
                 last_error = e
-                original = self._is_retriable_lock_error(e)
+                original = self._unwrap_lock_error_or_raise(e)
                 if self._try_clear_stale_lock(original):
                     continue
                 if attempt < self.max_retries - 1:
@@ -185,7 +185,9 @@ class DatabaseManager:
         with self._write_lock:  # Thread safety within process
             self._with_lock_retry(_op)
 
-    def executemany(self, sql: str, seq_params: list[tuple[Any, ...]]) -> None:
+    def executemany(
+        self, sql: str, seq_params: Sequence[list[Any] | tuple[Any, ...]]
+    ) -> None:
         """Execute multiple write operations in a single transaction.
 
         Opens a connection via the engine, executes all statements, and
@@ -193,7 +195,10 @@ class DatabaseManager:
 
         Args:
             sql: SQL statement to execute
-            seq_params: Sequence of parameter tuples
+            seq_params: One parameter sequence per row - list or tuple,
+                mirroring execute()'s single-row params (each row is coerced
+                to a tuple before reaching the driver, since SQLAlchemy's
+                parameter distiller rejects a bare list there)
         """
 
         def _op() -> None:
