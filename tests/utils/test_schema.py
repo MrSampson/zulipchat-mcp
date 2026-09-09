@@ -1,8 +1,8 @@
 """Tests for utils/schema.py - canonical SQLAlchemy Core schema definitions.
 
-Verifies the SQLAlchemy Core Table objects mirror the hand-written DuckDB DDL in
-database.py exactly: same tables, same columns, same nullability, same primary
-keys, same foreign keys. No behavior change - nothing consumes this schema yet.
+Verifies the SQLAlchemy Core Table objects match the tables Alembic's initial
+migration actually creates via DatabaseManager: same tables, same columns,
+same nullability, same primary keys, same foreign keys.
 """
 
 from pathlib import Path
@@ -14,13 +14,6 @@ from src.zulipchat_mcp.utils.database import DatabaseManager
 from src.zulipchat_mcp.utils.schema import metadata
 
 EXPECTED_TABLES: dict[str, dict[str, object]] = {
-    "schema_migrations": {
-        "columns": {"version": Integer, "applied_at": DateTime},
-        "not_null": set(),
-        "primary_key": {"version"},
-        "foreign_keys": {},
-        "server_defaults": {},
-    },
     "afk_state": {
         "columns": {
             "id": Integer,
@@ -349,9 +342,10 @@ class TestTableShapes:
 
 # DuckDB's catalog reports its own native type names, not what SQLAlchemy's
 # generic dialect would compile them to (e.g. Text() compiles generically to
-# "TEXT", but DuckDB's catalog reports "VARCHAR"). duckdb_engine - added in
-# issue #3 - will handle this properly via a real dialect; hand-mapped here
-# since nothing wires schema.py to a DuckDB SQLAlchemy dialect yet.
+# "TEXT", but DuckDB's catalog reports "VARCHAR"). This test reads the catalog
+# directly via raw SQL rather than SQLAlchemy reflection, so it needs this
+# mapping regardless of duckdb_engine being wired in for migrations (issue #2)
+# or, eventually, for DatabaseManager's own query/execute path (issue #3).
 _DUCKDB_CATALOG_TYPE_NAME: dict[type, str] = {
     Integer: "INTEGER",
     Text: "VARCHAR",
@@ -361,9 +355,10 @@ _DUCKDB_CATALOG_TYPE_NAME: dict[type, str] = {
 
 
 def test_schema_matches_the_ddl_database_py_actually_executes(tmp_path: Path) -> None:
-    """schema.py mirrors the real DDL DatabaseManager runs - not just EXPECTED_TABLES,
-    which is itself hand-transcribed from schema.py and can't catch a transcription
-    error made identically in both places.
+    """schema.py mirrors the real DDL Alembic's initial migration executes via
+    DatabaseManager - not just EXPECTED_TABLES, which is itself hand-transcribed
+    from schema.py and can't catch a transcription error made identically in
+    both places.
     """
     db_path = str(tmp_path / "schema_check.duckdb")
     DatabaseManager._instance = None

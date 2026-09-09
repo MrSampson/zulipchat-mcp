@@ -64,7 +64,8 @@ uv run python -c "from zulipchat_mcp.server import main; print('OK')"
 src/zulipchat_mcp/
 ├── core/           # Business logic (client, identity, commands, batch processing)
 ├── tools/          # MCP tool implementations (messaging, streams, search, events, users, files)
-├── utils/          # Shared utilities (logging, database, health, metrics)
+├── utils/          # Shared utilities (logging, database, migrations, health, metrics)
+├── migrations/     # Alembic environment + revision scripts for the DuckDB schema
 ├── services/       # Background services (scheduler, message listener)
 ├── integrations/   # AI client integrations
 └── config.py       # Configuration management
@@ -76,7 +77,7 @@ src/zulipchat_mcp/
 - **Client Wrapper**: `src/zulipchat_mcp/core/client.py` - Dual identity Zulip API wrapper with caching
 - **Tools**: `src/zulipchat_mcp/tools/*.py` - MCP tool implementations
 - **Configuration**: `src/zulipchat_mcp/config.py` - Environment/CLI configuration management
-- **Database**: DuckDB integration for persistence and caching
+- **Database**: DuckDB integration for persistence and caching, schema managed via Alembic (see [Database Migrations](#database-migrations))
 
 ### Dual Identity System
 The client supports both user and bot credentials:
@@ -228,6 +229,16 @@ execute_chain([
     }}
 ])
 ```
+
+## Database Migrations
+
+Schema changes go through Alembic, seeded from the canonical schema in `src/zulipchat_mcp/utils/schema.py` (SQLAlchemy Core `Table` objects - the source of truth). `DatabaseManager.__init__` runs migrations automatically via `utils/migrations.py::run_migrations()`; there is no separate CLI step for the running server.
+
+**To add a migration**: change the `Table` definitions in `utils/schema.py` first, then hand-write a new revision under `src/zulipchat_mcp/migrations/versions/` (`down_revision` pointing at the current head) that applies the equivalent `op.*` DDL calls. `alembic revision -m "..."` (empty scaffold) works for the boilerplate; `alembic revision --autogenerate` does not - `duckdb_engine` 0.17.0's reflection support reuses Postgres's `pg_catalog` queries wholesale and crashes against DuckDB (see `alembic.ini`). Only the migration runner uses SQLAlchemy/`duckdb_engine`; `DatabaseManager`'s regular `execute`/`query` methods stay on raw `duckdb.connect()` connections.
+
+**`duckdb_engine` gotcha**: its dialect subclasses PostgreSQL's, so SQLAlchemy's default autoincrement heuristic for single-column `Integer` primary keys compiles to `SERIAL`, which DuckDB doesn't support. Every `Integer` primary key in `schema.py` sets `autoincrement=False` explicitly - keep that on any new one.
+
+Existing databases created before Alembic (with the old hand-rolled `schema_migrations` table at version 1) are detected on first run and stamped at the initial revision rather than having its DDL replayed - see `_needs_legacy_stamp` in `utils/migrations.py`.
 
 ## Common Issues
 

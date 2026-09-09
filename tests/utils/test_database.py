@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, call, patch
 
 import duckdb
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from src.zulipchat_mcp.utils.database import (
     DatabaseLockedError,
@@ -33,42 +34,63 @@ class TestDatabaseManager:
             mock.IOException = duckdb.IOException
             yield mock
 
-    def test_init_success(self, mock_duckdb, tmp_path):
-        """Test successful initialization with short-lived connection for migrations."""
+    def test_init_success(self, tmp_path):
+        """Test successful initialization runs Alembic migrations against a real DB."""
         db_path = str(tmp_path / "test.db")
         db = DatabaseManager(db_path)
 
         assert db._initialized is True
         assert db.db_path == db_path
-        # Connection was opened for migrations and closed
-        mock_duckdb.connect.assert_called()
+        conn = duckdb.connect(db_path, read_only=True)
+        try:
+            row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+        finally:
+            conn.close()
+        assert row == ("0001",)
 
-    def test_init_lock_retry_success(self, mock_duckdb, tmp_path):
+    def test_init_lock_retry_success(self, tmp_path):
         """Test initialization retries on lock and succeeds."""
         db_path = str(tmp_path / "test.db")
 
-        # Fail twice with lock error, then succeed
-        lock_error = duckdb.IOException("IO Error: Could not set lock on file")
-        conn = MagicMock()
+        # Fail twice with a lock error (as run_migrations raises it - a
+        # SQLAlchemy OperationalError, not a raw duckdb.IOException), then
+        # succeed. _try_clear_stale_lock is forced to False so the retry
+        # goes through the sleep-and-retry branch rather than the stale-PID
+        # short-circuit, decoupling this test from real PID liveness.
+        lock_error = OperationalError(
+            "stmt", None, Exception("IO Error: Could not set lock on file")
+        )
 
-        mock_duckdb.connect.side_effect = [lock_error, lock_error, conn]
-
-        db = DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
+        with (
+            patch(
+                "src.zulipchat_mcp.utils.database.run_migrations",
+                side_effect=[lock_error, lock_error, None],
+            ) as mock_run_migrations,
+            patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False),
+        ):
+            db = DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
 
         assert db._initialized is True
-        assert mock_duckdb.connect.call_count == 3
+        assert mock_run_migrations.call_count == 3
 
-    def test_init_lock_failure(self, mock_duckdb, tmp_path):
+    def test_init_lock_failure(self, tmp_path):
         """Test initialization raises DatabaseLockedError after retries."""
         db_path = str(tmp_path / "test.db")
-        lock_error = duckdb.IOException("IO Error: Could not set lock on file")
+        lock_error = OperationalError(
+            "stmt", None, Exception("IO Error: Could not set lock on file")
+        )
 
-        mock_duckdb.connect.side_effect = lock_error
+        with (
+            patch(
+                "src.zulipchat_mcp.utils.database.run_migrations",
+                side_effect=lock_error,
+            ) as mock_run_migrations,
+            patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False),
+        ):
+            with pytest.raises(DatabaseLockedError, match="Database is locked"):
+                DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
 
-        with pytest.raises(DatabaseLockedError, match="Database is locked"):
-            DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
-
-        assert mock_duckdb.connect.call_count == 3
+        assert mock_run_migrations.call_count == 3
 
     def test_execute_opens_closes_connection(self, mock_duckdb, tmp_path):
         """Test execute opens and closes connection for each operation."""
