@@ -10,10 +10,12 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timezone
 from typing import Any
 
 import duckdb
+from sqlalchemy.exc import OperationalError
+
+from .migrations import run_migrations
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +68,7 @@ class DatabaseManager:
         self._write_lock = threading.RLock()  # Thread safety within process
         self._initialized: bool = False
 
-        dirname = os.path.dirname(db_path)
-        if dirname:
-            os.makedirs(dirname, exist_ok=True)
-
-        # Run migrations using short-lived connection
+        # run_migrations() creates db_path's parent directory itself.
         self._run_migrations_with_retry()
         self._initialized = True
 
@@ -78,7 +76,7 @@ class DatabaseManager:
         """Create a new database connection."""
         return duckdb.connect(self.db_path, config={"access_mode": "READ_WRITE"})
 
-    def _try_clear_stale_lock(self, error: duckdb.IOException) -> bool:
+    def _try_clear_stale_lock(self, error: BaseException) -> bool:
         """Check if the lock is held by a dead process and clear it if so.
 
         DuckDB error messages include the locking PID, e.g.:
@@ -117,274 +115,46 @@ class DatabaseManager:
         return True
 
     def _run_migrations_with_retry(self) -> None:
-        """Run migrations with retry logic for lock contention."""
+        """Run migrations with retry logic for lock contention.
+
+        Migrations go through Alembic/duckdb_engine rather than a raw
+        duckdb connection, so lock contention surfaces as a SQLAlchemy
+        OperationalError (wrapping the underlying duckdb.IOException) - not
+        the duckdb.IOException the other short-lived-connection methods
+        below catch directly.
+
+        Only OperationalErrors that actually look like lock contention get
+        retried/relabeled as DatabaseLockedError. A genuine migration
+        failure (a real DDL/schema bug, for instance) is also an
+        OperationalError but must propagate as itself - mislabeling it as
+        "Database is locked" would send debugging down the wrong path.
+        """
         last_error: Exception | None = None
         for attempt in range(self.max_retries):
-            conn = None
             try:
-                conn = self._connect()
-                self._run_migrations(conn)
+                run_migrations(self.db_path)
                 return
-            except duckdb.IOException as e:
+            except OperationalError as e:
+                # e.orig is the underlying duckdb exception's precise
+                # message; str(e) also includes the SQL statement and a
+                # sqlalche.me URL, which could coincidentally contain "lock".
+                original = e.orig if e.orig is not None else e
+                if "lock" not in str(original).lower():
+                    raise
                 last_error = e
-                if "lock" in str(e).lower():
-                    if self._try_clear_stale_lock(e):
-                        continue  # Retry immediately after clearing stale lock
-                    if attempt < self.max_retries - 1:
-                        time.sleep(self.retry_delay * (2**attempt))
-                        continue
+                # No backoff here (unlike the branch below): a stale lock
+                # from a dead process is already gone, so there's nothing
+                # to wait out - retrying immediately is deliberate, not a
+                # missing sleep. Same pattern in the other retry loops below.
+                if self._try_clear_stale_lock(original):
+                    continue
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (2**attempt))
+                    continue
                 raise DatabaseLockedError(self.db_path, e) from e
-            finally:
-                if conn:
-                    conn.close()
 
         if last_error:
             raise DatabaseLockedError(self.db_path, last_error)
-
-    def _run_migrations(self, conn: duckdb.DuckDBPyConnection) -> None:
-        """Run all database migrations idempotently.
-
-        Args:
-            conn: Active database connection to use for migrations
-        """
-        # Create migrations table
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS schema_migrations(
-            version INTEGER PRIMARY KEY,
-            applied_at TIMESTAMP
-          );
-        """
-        )
-
-        # Version 1 schema - Core tables for agent tracking and state
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS afk_state(
-            id INTEGER PRIMARY KEY,
-            is_afk BOOLEAN NOT NULL,
-            reason TEXT,
-            auto_return_at TIMESTAMP,
-            updated_at TIMESTAMP NOT NULL
-          );
-        """
-        )
-
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS agents(
-            agent_id TEXT PRIMARY KEY,
-            agent_type TEXT NOT NULL,
-            created_at TIMESTAMP NOT NULL,
-            metadata TEXT
-          );
-        """
-        )
-
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS agent_instances(
-            instance_id TEXT PRIMARY KEY,
-            agent_id TEXT NOT NULL,
-            session_id TEXT,
-            project_dir TEXT,
-            host TEXT,
-            started_at TIMESTAMP NOT NULL,
-            FOREIGN KEY(agent_id) REFERENCES agents(agent_id)
-          );
-        """
-        )
-
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS user_input_requests(
-            request_id TEXT PRIMARY KEY,
-            agent_id TEXT NOT NULL,
-            question TEXT NOT NULL,
-            context TEXT,
-            options TEXT,
-            status TEXT NOT NULL,
-            created_at TIMESTAMP NOT NULL,
-            responded_at TIMESTAMP,
-            response TEXT
-          );
-        """
-        )
-
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS tasks(
-            task_id TEXT PRIMARY KEY,
-            agent_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            description TEXT,
-            status TEXT NOT NULL,
-            progress INTEGER,
-            started_at TIMESTAMP NOT NULL,
-            completed_at TIMESTAMP,
-            outputs TEXT,
-            metrics TEXT
-          );
-        """
-        )
-
-        # Agent status audit trail (optional)
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS agent_status(
-            status_id TEXT PRIMARY KEY,
-            agent_type TEXT NOT NULL,
-            status TEXT NOT NULL,
-            message TEXT,
-            created_at TIMESTAMP NOT NULL
-          );
-        """
-        )
-
-        # Optional cache tables
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS streams_cache(
-            key TEXT PRIMARY KEY,
-            payload TEXT NOT NULL,
-            fetched_at TIMESTAMP NOT NULL
-          );
-        """
-        )
-
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS users_cache(
-            key TEXT PRIMARY KEY,
-            payload TEXT NOT NULL,
-            fetched_at TIMESTAMP NOT NULL
-          );
-        """
-        )
-
-        # Record schema version if not exists
-        existing_version = conn.execute(
-            "SELECT version FROM schema_migrations WHERE version = 1"
-        ).fetchone()
-
-        if not existing_version:
-            conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)",
-                [datetime.now(timezone.utc)],
-            )
-
-        # Table for agent inbound chat events (from Zulip)
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS agent_events(
-            id TEXT PRIMARY KEY,
-            zulip_message_id INTEGER,
-            topic TEXT,
-            sender_email TEXT,
-            content TEXT,
-            created_at TIMESTAMP,
-            acked BOOLEAN DEFAULT FALSE
-          );
-        """
-        )
-
-        # Persist message listener queue state across restarts
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS listener_state(
-            id INTEGER PRIMARY KEY DEFAULT 1,
-            queue_id TEXT,
-            last_event_id INTEGER,
-            updated_at TIMESTAMP NOT NULL
-          );
-        """
-        )
-
-        # Agent control-plane tables used by the Zulip session architecture.
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS agent_profiles(
-            agent_id TEXT PRIMARY KEY,
-            agent_name TEXT NOT NULL,
-            agent_type TEXT NOT NULL,
-            owner_email TEXT NOT NULL,
-            stream_name TEXT NOT NULL,
-            topic_prefix TEXT NOT NULL,
-            metadata TEXT,
-            created_at TIMESTAMP NOT NULL,
-            updated_at TIMESTAMP NOT NULL
-          );
-        """
-        )
-
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS agent_sessions(
-            session_id TEXT PRIMARY KEY,
-            agent_id TEXT NOT NULL,
-            external_session_id TEXT,
-            stream_name TEXT NOT NULL,
-            topic_name TEXT NOT NULL,
-            owner_email TEXT NOT NULL,
-            project_name TEXT,
-            project_dir TEXT,
-            host TEXT,
-            status TEXT NOT NULL,
-            metadata TEXT,
-            created_at TIMESTAMP NOT NULL,
-            updated_at TIMESTAMP NOT NULL,
-            ended_at TIMESTAMP,
-            FOREIGN KEY(agent_id) REFERENCES agent_profiles(agent_id)
-          );
-        """
-        )
-
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS agent_requests(
-            request_id TEXT PRIMARY KEY,
-            agent_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            request_type TEXT NOT NULL,
-            prompt TEXT NOT NULL,
-            options TEXT,
-            context TEXT,
-            status TEXT NOT NULL,
-            source_event TEXT,
-            metadata TEXT,
-            created_at TIMESTAMP NOT NULL,
-            responded_at TIMESTAMP,
-            response TEXT,
-            FOREIGN KEY(agent_id) REFERENCES agent_profiles(agent_id),
-            FOREIGN KEY(session_id) REFERENCES agent_sessions(session_id)
-          );
-        """
-        )
-
-        conn.execute(
-            """
-          CREATE TABLE IF NOT EXISTS session_events(
-            id TEXT PRIMARY KEY,
-            agent_id TEXT,
-            session_id TEXT,
-            stream_name TEXT,
-            topic_name TEXT,
-            sender_email TEXT,
-            direction TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            content TEXT,
-            normalized_content TEXT,
-            command TEXT,
-            decision TEXT,
-            request_id TEXT,
-            metadata TEXT,
-            created_at TIMESTAMP NOT NULL,
-            acked BOOLEAN DEFAULT FALSE,
-            FOREIGN KEY(agent_id) REFERENCES agent_profiles(agent_id),
-            FOREIGN KEY(session_id) REFERENCES agent_sessions(session_id)
-          );
-        """
-        )
 
     def execute(
         self, sql: str, params: list[Any] | tuple[Any, ...] | None = None

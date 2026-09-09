@@ -1,26 +1,20 @@
 """Tests for utils/schema.py - canonical SQLAlchemy Core schema definitions.
 
-Verifies the SQLAlchemy Core Table objects mirror the hand-written DuckDB DDL in
-database.py exactly: same tables, same columns, same nullability, same primary
-keys, same foreign keys. No behavior change - nothing consumes this schema yet.
+Verifies the SQLAlchemy Core Table objects match the tables Alembic's initial
+migration actually creates via DatabaseManager: same tables, same columns,
+same nullability, same primary keys, same foreign keys.
 """
 
 from pathlib import Path
+from typing import Any
 
 import duckdb
-from sqlalchemy import Boolean, DateTime, DefaultClause, Integer, Table, Text
+from sqlalchemy import Boolean, Column, DateTime, DefaultClause, Integer, Table, Text
 
 from src.zulipchat_mcp.utils.database import DatabaseManager
 from src.zulipchat_mcp.utils.schema import metadata
 
 EXPECTED_TABLES: dict[str, dict[str, object]] = {
-    "schema_migrations": {
-        "columns": {"version": Integer, "applied_at": DateTime},
-        "not_null": set(),
-        "primary_key": {"version"},
-        "foreign_keys": {},
-        "server_defaults": {},
-    },
     "afk_state": {
         "columns": {
             "id": Integer,
@@ -349,9 +343,10 @@ class TestTableShapes:
 
 # DuckDB's catalog reports its own native type names, not what SQLAlchemy's
 # generic dialect would compile them to (e.g. Text() compiles generically to
-# "TEXT", but DuckDB's catalog reports "VARCHAR"). duckdb_engine - added in
-# issue #3 - will handle this properly via a real dialect; hand-mapped here
-# since nothing wires schema.py to a DuckDB SQLAlchemy dialect yet.
+# "TEXT", but DuckDB's catalog reports "VARCHAR"). This test reads the catalog
+# directly via raw SQL rather than SQLAlchemy reflection, so it needs this
+# mapping regardless of duckdb_engine being wired in for migrations (issue #2)
+# or, eventually, for DatabaseManager's own query/execute path (issue #3).
 _DUCKDB_CATALOG_TYPE_NAME: dict[type, str] = {
     Integer: "INTEGER",
     Text: "VARCHAR",
@@ -361,9 +356,10 @@ _DUCKDB_CATALOG_TYPE_NAME: dict[type, str] = {
 
 
 def test_schema_matches_the_ddl_database_py_actually_executes(tmp_path: Path) -> None:
-    """schema.py mirrors the real DDL DatabaseManager runs - not just EXPECTED_TABLES,
-    which is itself hand-transcribed from schema.py and can't catch a transcription
-    error made identically in both places.
+    """schema.py mirrors the real DDL Alembic's initial migration executes via
+    DatabaseManager - not just EXPECTED_TABLES, which is itself hand-transcribed
+    from schema.py and can't catch a transcription error made identically in
+    both places.
     """
     db_path = str(tmp_path / "schema_check.duckdb")
     DatabaseManager._instance = None
@@ -389,5 +385,74 @@ def test_schema_matches_the_ddl_database_py_actually_executes(tmp_path: Path) ->
             assert [r[0] for r in rows] == expected_names, table_name
             assert [r[1] for r in rows] == expected_types, table_name
             assert [bool(r[2]) for r in rows] == expected_nullable, table_name
+    finally:
+        conn.close()
+
+
+# DuckDB's catalog renders a server_default's underlying value, not the
+# literal SQL text passed to sa.text() (e.g. Boolean text("FALSE") becomes
+# a CAST expression, not the string "FALSE"). Only the values this schema
+# actually uses are mapped - same "it needs this mapping" reasoning as
+# _DUCKDB_CATALOG_TYPE_NAME above.
+_DUCKDB_BOOLEAN_DEFAULT_RENDERING: dict[str, str] = {
+    "FALSE": "CAST('f' AS BOOLEAN)",
+    "TRUE": "CAST('t' AS BOOLEAN)",
+}
+
+
+def _expected_duckdb_default(column: Column[Any]) -> str:
+    server_default = column.server_default
+    assert isinstance(server_default, DefaultClause)
+    if isinstance(column.type, Boolean):
+        return _DUCKDB_BOOLEAN_DEFAULT_RENDERING[str(server_default.arg)]
+    return str(server_default.arg)
+
+
+def test_migration_ddl_matches_foreign_keys_and_server_defaults(
+    tmp_path: Path,
+) -> None:
+    """test_schema_matches_the_ddl_database_py_actually_executes above only
+    compares column name/type/nullability against the executed DDL - a
+    migration whose foreign keys or server defaults disagree with schema.py
+    would pass it silently. This is the only place that checks those two
+    against what Alembic's migration actually creates, rather than against
+    the metadata object migrations/versions/0001_initial_schema.py itself
+    happens to (no longer) be built from.
+    """
+    db_path = str(tmp_path / "constraints_check.duckdb")
+    DatabaseManager._instance = None
+    DatabaseManager(db_path)
+    DatabaseManager._instance = None
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        actual_fks = {
+            (row[0], row[1][0])
+            for row in conn.execute(
+                "SELECT table_name, constraint_column_names FROM duckdb_constraints() "
+                "WHERE constraint_type = 'FOREIGN KEY'"
+            ).fetchall()
+        }
+        expected_fks = {
+            (table.name, fk.parent.name)
+            for table in metadata.tables.values()
+            for fk in table.foreign_keys
+        }
+        assert actual_fks == expected_fks
+
+        actual_defaults = {
+            (row[0], row[1]): row[2]
+            for row in conn.execute(
+                "SELECT table_name, column_name, column_default FROM duckdb_columns() "
+                "WHERE column_default IS NOT NULL"
+            ).fetchall()
+        }
+        expected_defaults = {
+            (table.name, column.name): _expected_duckdb_default(column)
+            for table in metadata.tables.values()
+            for column in table.columns
+            if column.server_default is not None
+        }
+        assert actual_defaults == expected_defaults
     finally:
         conn.close()

@@ -1,9 +1,14 @@
 """Canonical SQLAlchemy Core schema definitions for ZulipChat MCP persistence.
 
-Mirrors the hand-written DDL executed by ``DatabaseManager._run_migrations`` in
-``database.py``. This module defines the schema only; nothing in the runtime
-code path consumes it yet. It is the shared source of truth that both the
-DuckDB backend (duckdb_engine) and the future Postgres backend will build on.
+This is the source of truth Alembic's initial migration (``migrations/versions/
+0001_initial_schema.py``) builds the database from - see ``utils/migrations.py``.
+The future Postgres backend (issue #4) will build on it too.
+
+Integer primary keys declare ``autoincrement=False`` deliberately: without it,
+SQLAlchemy's default single-column-integer-PK heuristic compiles to ``SERIAL``
+under duckdb_engine's Postgres-derived dialect, which the installed DuckDB
+version doesn't support (``Type with name SERIAL does not exist``). The real
+DDL these tables mirror never used autoincrement in the first place.
 
 All ``DateTime`` columns here are timezone-naive (matching the hand-written
 DDL, and DuckDB's own naive TIMESTAMP), even though database.py writes
@@ -26,17 +31,10 @@ from sqlalchemy import (
 
 metadata = MetaData()
 
-schema_migrations = Table(
-    "schema_migrations",
-    metadata,
-    Column("version", Integer, primary_key=True),
-    Column("applied_at", DateTime),
-)
-
 afk_state = Table(
     "afk_state",
     metadata,
-    Column("id", Integer, primary_key=True),
+    Column("id", Integer, primary_key=True, autoincrement=False),
     Column("is_afk", Boolean, nullable=False),
     Column("reason", Text),
     Column("auto_return_at", DateTime),
@@ -133,7 +131,9 @@ agent_events = Table(
 listener_state = Table(
     "listener_state",
     metadata,
-    Column("id", Integer, primary_key=True, server_default=text("1")),
+    Column(
+        "id", Integer, primary_key=True, autoincrement=False, server_default=text("1")
+    ),
     Column("queue_id", Text),
     Column("last_event_id", Integer),
     Column("updated_at", DateTime, nullable=False),

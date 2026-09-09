@@ -284,7 +284,6 @@ def mock_datetime():
 
 
 # Markers for different test categories
-pytest_mark_slow = pytest.mark.slow
 pytest_mark_integration = pytest.mark.integration
 pytest_mark_unit = pytest.mark.unit
 
