@@ -3,11 +3,12 @@
 import subprocess
 import sys
 import time
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DataError, OperationalError, ProgrammingError
+from sqlalchemy.pool import NullPool
 
 from src.zulipchat_mcp.utils.database import (
     DatabaseLockedError,
@@ -16,6 +17,18 @@ from src.zulipchat_mcp.utils.database import (
     init_database,
 )
 from src.zulipchat_mcp.utils.migrations import IN_MEMORY_DB_PATH
+
+LOCK_ERROR = OperationalError(
+    "stmt", None, Exception("IO Error: Could not set lock on file")
+)
+
+
+def _mock_context_manager(return_value: MagicMock) -> MagicMock:
+    """Build a MagicMock usable as a `with ... as x:` block yielding return_value."""
+    cm = MagicMock()
+    cm.__enter__.return_value = return_value
+    cm.__exit__.return_value = False
+    return cm
 
 
 class TestDatabaseManager:
@@ -30,21 +43,17 @@ class TestDatabaseManager:
             yield
         DatabaseManager._instance = None
 
-    @pytest.fixture
-    def mock_duckdb(self):
-        with patch("src.zulipchat_mcp.utils.database.duckdb") as mock:
-            conn = MagicMock()
-            mock.connect.return_value = conn
-            mock.IOException = duckdb.IOException
-            yield mock
-
     def test_init_success(self, tmp_path):
-        """Test successful initialization runs Alembic migrations against a real DB."""
+        """Test successful initialization runs Alembic migrations against a real
+        DB, and that the engine is configured with NullPool so connections are
+        genuinely short-lived (opened/closed per call) rather than pooled.
+        """
         db_path = str(tmp_path / "test.db")
         db = DatabaseManager(db_path)
 
         assert db._initialized is True
         assert db.db_path == db_path
+        assert isinstance(db._engine.pool, NullPool)
         conn = duckdb.connect(db_path, read_only=True)
         try:
             row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
@@ -61,14 +70,10 @@ class TestDatabaseManager:
         # succeed. _try_clear_stale_lock is forced to False so the retry
         # goes through the sleep-and-retry branch rather than the stale-PID
         # short-circuit, decoupling this test from real PID liveness.
-        lock_error = OperationalError(
-            "stmt", None, Exception("IO Error: Could not set lock on file")
-        )
-
         with (
             patch(
                 "src.zulipchat_mcp.utils.database.run_migrations",
-                side_effect=[lock_error, lock_error, None],
+                side_effect=[LOCK_ERROR, LOCK_ERROR, None],
             ) as mock_run_migrations,
             patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False),
         ):
@@ -80,14 +85,11 @@ class TestDatabaseManager:
     def test_init_lock_failure(self, tmp_path):
         """Test initialization raises DatabaseLockedError after retries."""
         db_path = str(tmp_path / "test.db")
-        lock_error = OperationalError(
-            "stmt", None, Exception("IO Error: Could not set lock on file")
-        )
 
         with (
             patch(
                 "src.zulipchat_mcp.utils.database.run_migrations",
-                side_effect=lock_error,
+                side_effect=LOCK_ERROR,
             ) as mock_run_migrations,
             patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False),
         ):
@@ -102,14 +104,11 @@ class TestDatabaseManager:
         without going through the sleep-and-retry branch.
         """
         db_path = str(tmp_path / "test.db")
-        lock_error = OperationalError(
-            "stmt", None, Exception("IO Error: Could not set lock on file")
-        )
 
         with (
             patch(
                 "src.zulipchat_mcp.utils.database.run_migrations",
-                side_effect=[lock_error, None],
+                side_effect=[LOCK_ERROR, None],
             ) as mock_run_migrations,
             patch.object(
                 DatabaseManager, "_try_clear_stale_lock", side_effect=[True]
@@ -130,14 +129,11 @@ class TestDatabaseManager:
         DatabaseLockedError after the for loop ends.
         """
         db_path = str(tmp_path / "test.db")
-        lock_error = OperationalError(
-            "stmt", None, Exception("IO Error: Could not set lock on file")
-        )
 
         with (
             patch(
                 "src.zulipchat_mcp.utils.database.run_migrations",
-                side_effect=lock_error,
+                side_effect=LOCK_ERROR,
             ) as mock_run_migrations,
             patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=True),
         ):
@@ -200,166 +196,175 @@ class TestDatabaseManager:
             holder.terminate()
             holder.wait()
 
-    def test_execute_opens_closes_connection(self, mock_duckdb, tmp_path):
-        """Test execute opens and closes connection for each operation."""
-        db_path = str(tmp_path / "test.db")
-        db = DatabaseManager(db_path)
-
-        # Reset mock to clear init calls
-        mock_duckdb.connect.reset_mock()
-        conn = MagicMock()
-        mock_duckdb.connect.return_value = conn
+    def test_execute_creates_row(self, tmp_path):
+        """execute() runs a real write and commits it."""
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (x INTEGER)")
 
         db.execute("INSERT INTO t VALUES (?)", [1])
 
-        # Verify connection opened
-        mock_duckdb.connect.assert_called_once()
-        # Verify transaction calls
-        calls = conn.execute.call_args_list
-        assert call("BEGIN") in calls
-        assert call("INSERT INTO t VALUES (?)", [1]) in calls
-        assert call("COMMIT") in calls
-        # Verify connection closed
-        conn.close.assert_called_once()
+        assert db.query("SELECT x FROM t") == [(1,)]
 
-    def test_execute_retry_on_lock(self, mock_duckdb, tmp_path):
-        """Test execute retries on lock contention."""
-        db_path = str(tmp_path / "test.db")
-        db = DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
+    def test_execute_propagates_error_and_leaves_db_usable(self, tmp_path):
+        """A failing statement raises, and the connection is still released
+        cleanly - later calls against the same DatabaseManager still work.
+        """
+        db = DatabaseManager(str(tmp_path / "test.db"))
 
-        mock_duckdb.connect.reset_mock()
+        with pytest.raises(ProgrammingError):
+            db.execute("INSERT INTO nonexistent_table VALUES (1)")
 
-        # First two connections fail with lock, third succeeds
-        lock_error = duckdb.IOException("IO Error: lock")
-        conn_success = MagicMock()
-        mock_duckdb.connect.side_effect = [lock_error, lock_error, conn_success]
+        db.execute("CREATE TABLE t (x INTEGER)")
+        assert db.query("SELECT x FROM t") == []
 
-        db.execute("INSERT", [1])
+    def test_execute_retries_on_lock_then_succeeds(self, tmp_path):
+        """execute() retries when the engine reports lock contention."""
+        db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
 
-        assert mock_duckdb.connect.call_count == 3
-        conn_success.close.assert_called_once()
-
-    def test_execute_rollback_on_error(self, mock_duckdb, tmp_path):
-        """Test execute rolls back on error."""
-        db_path = str(tmp_path / "test.db")
-        db = DatabaseManager(db_path)
-
-        mock_duckdb.connect.reset_mock()
-        conn = MagicMock()
-        mock_duckdb.connect.return_value = conn
-
-        # Simulate error on the INSERT
-        conn.execute.side_effect = [
-            None,  # BEGIN
-            Exception("Fail"),  # INSERT fails
-            None,  # ROLLBACK
+        success_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine.begin.side_effect = [
+            LOCK_ERROR,
+            LOCK_ERROR,
+            _mock_context_manager(success_conn),
         ]
+        db._engine = mock_engine
 
-        with pytest.raises(Exception, match="Fail"):
-            db.execute("INSERT", [1])
+        with patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False):
+            db.execute("INSERT INTO t VALUES (?)", [1])
 
-        # Verify rollback was called
-        assert call("ROLLBACK") in conn.execute.call_args_list
-        conn.close.assert_called()
+        assert mock_engine.begin.call_count == 3
+        success_conn.exec_driver_sql.assert_called_once_with(
+            "INSERT INTO t VALUES (?)", (1,)
+        )
 
-    def test_executemany(self, mock_duckdb, tmp_path):
-        """Test executemany uses short-lived connection."""
-        db_path = str(tmp_path / "test.db")
-        db = DatabaseManager(db_path)
+    def test_execute_raises_database_locked_error_after_exhausting_retries(
+        self, tmp_path
+    ):
+        """execute() gives up and raises DatabaseLockedError after max_retries."""
+        db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
 
-        mock_duckdb.connect.reset_mock()
-        conn = MagicMock()
-        mock_duckdb.connect.return_value = conn
+        mock_engine = MagicMock()
+        mock_engine.begin.side_effect = LOCK_ERROR
+        db._engine = mock_engine
 
-        db.executemany("INSERT", [(1,), (2,)])
+        with patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False):
+            with pytest.raises(DatabaseLockedError, match="Database is locked"):
+                db.execute("INSERT INTO t VALUES (?)", [1])
 
-        calls = conn.execute.call_args_list
-        assert call("BEGIN") in calls
-        assert call("INSERT", (1,)) in calls
-        assert call("INSERT", (2,)) in calls
-        assert call("COMMIT") in calls
-        conn.close.assert_called_once()
+        assert mock_engine.begin.call_count == 3
 
-    def test_query(self, mock_duckdb, tmp_path):
-        """Test query uses short-lived connection."""
-        db_path = str(tmp_path / "test.db")
-        db = DatabaseManager(db_path)
+    def test_executemany_inserts_all_rows(self, tmp_path):
+        """executemany() writes every row in a single transaction."""
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (x INTEGER)")
 
-        mock_duckdb.connect.reset_mock()
-        conn = MagicMock()
+        db.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+
+        assert db.query("SELECT x FROM t ORDER BY x") == [(1,), (2,)]
+
+    def test_executemany_rolls_back_all_on_partial_failure(self, tmp_path):
+        """A failure partway through executemany() rolls back the whole
+        transaction - the first (successful) insert must not persist either.
+        """
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (x INTEGER)")
+
+        with pytest.raises(DataError):
+            db.executemany("INSERT INTO t VALUES (?)", [(1,), ("not-an-int",)])
+
+        assert db.query("SELECT x FROM t") == []
+
+    def test_query_returns_rows_as_tuples(self, tmp_path):
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (id INTEGER, name VARCHAR)")
+        db.execute("INSERT INTO t VALUES (?, ?)", [1, "a"])
+
+        assert db.query("SELECT id, name FROM t") == [(1, "a")]
+
+    def test_query_returns_empty_list_when_no_rows(self, tmp_path):
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (id INTEGER)")
+
+        assert db.query("SELECT id FROM t") == []
+
+    def test_query_retries_on_lock_then_succeeds(self, tmp_path):
+        """query() retries when the engine reports lock contention."""
+        db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
+
         cursor = MagicMock()
         cursor.fetchall.return_value = [(1,)]
-        conn.execute.return_value = cursor
-        mock_duckdb.connect.return_value = conn
+        success_conn = MagicMock()
+        success_conn.exec_driver_sql.return_value = cursor
+        mock_engine = MagicMock()
+        mock_engine.connect.side_effect = [
+            LOCK_ERROR,
+            LOCK_ERROR,
+            _mock_context_manager(success_conn),
+        ]
+        db._engine = mock_engine
 
-        res = db.query("SELECT *")
+        with patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False):
+            result = db.query("SELECT *")
 
-        assert res == [(1,)]
-        conn.close.assert_called_once()
+        assert result == [(1,)]
+        assert mock_engine.connect.call_count == 3
 
-    def test_query_one(self, mock_duckdb, tmp_path):
-        """Test query_one uses short-lived connection."""
-        db_path = str(tmp_path / "test.db")
-        db = DatabaseManager(db_path)
+    def test_query_one_returns_single_tuple(self, tmp_path):
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (id INTEGER)")
+        db.execute("INSERT INTO t VALUES (?)", [1])
 
-        mock_duckdb.connect.reset_mock()
-        conn = MagicMock()
-        cursor = MagicMock()
-        cursor.fetchone.return_value = (1,)
-        conn.execute.return_value = cursor
-        mock_duckdb.connect.return_value = conn
+        assert db.query_one("SELECT id FROM t") == (1,)
 
-        res = db.query_one("SELECT *")
+    def test_query_one_returns_none_when_no_rows(self, tmp_path):
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (id INTEGER)")
 
-        assert res == (1,)
-        conn.close.assert_called_once()
+        assert db.query_one("SELECT id FROM t") is None
 
-    def test_query_as_dicts(self, mock_duckdb, tmp_path):
-        """Test query_as_dicts returns list of dicts."""
-        db_path = str(tmp_path / "test.db")
-        db = DatabaseManager(db_path)
+    def test_query_as_dicts_returns_list_of_dicts(self, tmp_path):
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (id INTEGER, name VARCHAR)")
+        db.executemany("INSERT INTO t VALUES (?, ?)", [(1, "a"), (2, "b")])
 
-        mock_duckdb.connect.reset_mock()
-        conn = MagicMock()
-        cursor = MagicMock()
-        cursor.fetchall.return_value = [(1, "a"), (2, "b")]
-        cursor.description = [("id",), ("name",)]
-        conn.execute.return_value = cursor
-        mock_duckdb.connect.return_value = conn
+        result = db.query_as_dicts("SELECT id, name FROM t ORDER BY id")
 
-        res = db.query_as_dicts("SELECT *")
+        assert result == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
 
-        assert res == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
-        conn.close.assert_called_once()
+    def test_query_as_dicts_returns_empty_list_when_no_rows(self, tmp_path):
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (id INTEGER)")
 
-    def test_query_one_as_dict(self, mock_duckdb, tmp_path):
-        """Test query_one_as_dict returns single dict."""
-        db_path = str(tmp_path / "test.db")
-        db = DatabaseManager(db_path)
+        assert db.query_as_dicts("SELECT id FROM t") == []
 
-        mock_duckdb.connect.reset_mock()
-        conn = MagicMock()
-        cursor = MagicMock()
-        cursor.fetchone.return_value = (1, "a")
-        cursor.description = [("id",), ("name",)]
-        conn.execute.return_value = cursor
-        mock_duckdb.connect.return_value = conn
+    def test_query_one_as_dict_returns_dict(self, tmp_path):
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (id INTEGER, name VARCHAR)")
+        db.execute("INSERT INTO t VALUES (?, ?)", [1, "a"])
 
-        res = db.query_one_as_dict("SELECT *")
+        assert db.query_one_as_dict("SELECT id, name FROM t") == {"id": 1, "name": "a"}
 
-        assert res == {"id": 1, "name": "a"}
-        conn.close.assert_called_once()
+    def test_query_one_as_dict_returns_none_when_no_rows(self, tmp_path):
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (id INTEGER)")
 
-    def test_close_is_noop(self, mock_duckdb, tmp_path):
-        """Test close is a no-op since connections are short-lived."""
-        db_path = str(tmp_path / "test.db")
-        db = DatabaseManager(db_path)
+        assert db.query_one_as_dict("SELECT id FROM t") is None
 
-        # close should not raise and should be a no-op
+    def test_close_disposes_engine_without_error(self, tmp_path):
+        """close() disposes the engine. Under NullPool there's nothing
+        pooled to discard, but the engine stays usable afterward - dispose()
+        only clears idle pooled connections, it doesn't tear down the engine.
+        """
+        db = DatabaseManager(str(tmp_path / "test.db"))
+
         db.close()
-        assert db._initialized is True
 
-    def test_global_instances(self, mock_duckdb):
+        assert db._initialized is True
+        db.execute("CREATE TABLE t (x INTEGER)")
+        assert db.query("SELECT x FROM t") == []
+
+    def test_global_instances(self):
         """Test global instance helpers."""
         db = init_database(IN_MEMORY_DB_PATH)
         assert db is not None

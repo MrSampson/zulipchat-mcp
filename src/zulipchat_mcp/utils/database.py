@@ -3,6 +3,11 @@
 Uses short-lived connections for write operations to allow concurrent access
 from multiple MCP server instances. Each write operation opens a connection,
 executes, and closes it immediately to release the file lock.
+
+Connections are opened through a SQLAlchemy Engine (duckdb_engine) configured
+with NullPool, so the engine/pool machinery is what actually manages
+connect/disconnect - NullPool just means every checkout is a fresh
+connection, preserving the short-lived-connection behavior above.
 """
 
 import logging
@@ -12,10 +17,11 @@ import threading
 import time
 from typing import Any
 
-import duckdb
+from sqlalchemy import Engine, create_engine
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.pool import NullPool
 
-from .migrations import run_migrations
+from .migrations import run_migrations, sqlalchemy_url
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +73,15 @@ class DatabaseManager:
         self.retry_delay = retry_delay
         self._write_lock = threading.RLock()  # Thread safety within process
         self._initialized: bool = False
+        self._engine: Engine = create_engine(
+            sqlalchemy_url(db_path),
+            poolclass=NullPool,
+            connect_args={"config": {"access_mode": "READ_WRITE"}},
+        )
 
         # run_migrations() creates db_path's parent directory itself.
         self._run_migrations_with_retry()
         self._initialized = True
-
-    def _connect(self) -> duckdb.DuckDBPyConnection:
-        """Create a new database connection."""
-        return duckdb.connect(self.db_path, config={"access_mode": "READ_WRITE"})
 
     def _try_clear_stale_lock(self, error: BaseException) -> bool:
         """Check if the lock is held by a dead process and clear it if so.
@@ -117,12 +124,6 @@ class DatabaseManager:
     def _run_migrations_with_retry(self) -> None:
         """Run migrations with retry logic for lock contention.
 
-        Migrations go through Alembic/duckdb_engine rather than a raw
-        duckdb connection, so lock contention surfaces as a SQLAlchemy
-        OperationalError (wrapping the underlying duckdb.IOException) - not
-        the duckdb.IOException the other short-lived-connection methods
-        below catch directly.
-
         Only OperationalErrors that actually look like lock contention get
         retried/relabeled as DatabaseLockedError. A genuine migration
         failure (a real DDL/schema bug, for instance) is also an
@@ -156,47 +157,45 @@ class DatabaseManager:
         if last_error:
             raise DatabaseLockedError(self.db_path, last_error)
 
+    def _is_retriable_lock_error(self, error: OperationalError) -> BaseException:
+        """Return the unwrapped original error if `error` looks like lock
+        contention, else re-raise `error` unmangled (a genuine non-lock
+        OperationalError, e.g. a real schema bug, must propagate as itself).
+        """
+        original = error.orig if error.orig is not None else error
+        if "lock" not in str(original).lower():
+            raise error
+        return original
+
     def execute(
         self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
     ) -> None:
         """Execute a single write operation with short-lived connection.
 
-        Opens a connection, executes the statement in a transaction,
-        and closes immediately to release the file lock.
+        Opens a connection via the engine, executes the statement in a
+        transaction, and releases the connection immediately (NullPool) to
+        release the file lock.
 
         Args:
             sql: SQL statement to execute
             params: Parameters for the SQL statement
         """
         with self._write_lock:  # Thread safety within process
-            last_error: Exception | None = None
+            last_error: OperationalError | None = None
             for attempt in range(self.max_retries):
-                conn = None
                 try:
-                    conn = self._connect()
-                    conn.execute("BEGIN")
-                    conn.execute(sql, params or [])
-                    conn.execute("COMMIT")
+                    with self._engine.begin() as conn:
+                        conn.exec_driver_sql(sql, tuple(params) if params else ())
                     return
-                except duckdb.IOException as e:
+                except OperationalError as e:
                     last_error = e
-                    if "lock" in str(e).lower():
-                        if self._try_clear_stale_lock(e):
-                            continue
-                        if attempt < self.max_retries - 1:
-                            time.sleep(self.retry_delay * (2**attempt))
-                            continue
+                    original = self._is_retriable_lock_error(e)
+                    if self._try_clear_stale_lock(original):
+                        continue
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.retry_delay * (2**attempt))
+                        continue
                     raise DatabaseLockedError(self.db_path, e) from e
-                except Exception:
-                    if conn:
-                        try:
-                            conn.execute("ROLLBACK")
-                        except Exception:
-                            pass
-                    raise
-                finally:
-                    if conn:
-                        conn.close()
 
             if last_error:
                 raise DatabaseLockedError(self.db_path, last_error)
@@ -204,42 +203,30 @@ class DatabaseManager:
     def executemany(self, sql: str, seq_params: list[tuple[Any, ...]]) -> None:
         """Execute multiple write operations in a single transaction.
 
-        Opens a connection, executes all statements, and closes immediately.
+        Opens a connection via the engine, executes all statements, and
+        releases the connection immediately.
 
         Args:
             sql: SQL statement to execute
             seq_params: Sequence of parameter tuples
         """
         with self._write_lock:
-            last_error: Exception | None = None
+            last_error: OperationalError | None = None
             for attempt in range(self.max_retries):
-                conn = None
                 try:
-                    conn = self._connect()
-                    conn.execute("BEGIN")
-                    for params in seq_params:
-                        conn.execute(sql, params)
-                    conn.execute("COMMIT")
+                    with self._engine.begin() as conn:
+                        for params in seq_params:
+                            conn.exec_driver_sql(sql, params)
                     return
-                except duckdb.IOException as e:
+                except OperationalError as e:
                     last_error = e
-                    if "lock" in str(e).lower():
-                        if self._try_clear_stale_lock(e):
-                            continue
-                        if attempt < self.max_retries - 1:
-                            time.sleep(self.retry_delay * (2**attempt))
-                            continue
+                    original = self._is_retriable_lock_error(e)
+                    if self._try_clear_stale_lock(original):
+                        continue
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.retry_delay * (2**attempt))
+                        continue
                     raise DatabaseLockedError(self.db_path, e) from e
-                except Exception:
-                    if conn:
-                        try:
-                            conn.execute("ROLLBACK")
-                        except Exception:
-                            pass
-                    raise
-                finally:
-                    if conn:
-                        conn.close()
 
             if last_error:
                 raise DatabaseLockedError(self.db_path, last_error)
@@ -258,25 +245,21 @@ class DatabaseManager:
         Returns:
             List of result tuples
         """
-        last_error: Exception | None = None
+        last_error: OperationalError | None = None
         for attempt in range(self.max_retries):
-            conn = None
             try:
-                conn = self._connect()
-                cursor = conn.execute(sql, params or [])
-                return cursor.fetchall()
-            except duckdb.IOException as e:
+                with self._engine.connect() as conn:
+                    cursor = conn.exec_driver_sql(sql, tuple(params) if params else ())
+                    return [tuple(row) for row in cursor.fetchall()]
+            except OperationalError as e:
                 last_error = e
-                if "lock" in str(e).lower():
-                    if self._try_clear_stale_lock(e):
-                        continue
-                    if attempt < self.max_retries - 1:
-                        time.sleep(self.retry_delay * (2**attempt))
-                        continue
+                original = self._is_retriable_lock_error(e)
+                if self._try_clear_stale_lock(original):
+                    continue
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (2**attempt))
+                    continue
                 raise DatabaseLockedError(self.db_path, e) from e
-            finally:
-                if conn:
-                    conn.close()
 
         if last_error:
             raise DatabaseLockedError(self.db_path, last_error)
@@ -286,25 +269,22 @@ class DatabaseManager:
         self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
     ) -> tuple[Any, ...] | None:
         """Execute a read query and return the first result."""
-        last_error: Exception | None = None
+        last_error: OperationalError | None = None
         for attempt in range(self.max_retries):
-            conn = None
             try:
-                conn = self._connect()
-                cursor = conn.execute(sql, params or [])
-                return cursor.fetchone()
-            except duckdb.IOException as e:
+                with self._engine.connect() as conn:
+                    cursor = conn.exec_driver_sql(sql, tuple(params) if params else ())
+                    row = cursor.fetchone()
+                    return tuple(row) if row is not None else None
+            except OperationalError as e:
                 last_error = e
-                if "lock" in str(e).lower():
-                    if self._try_clear_stale_lock(e):
-                        continue
-                    if attempt < self.max_retries - 1:
-                        time.sleep(self.retry_delay * (2**attempt))
-                        continue
+                original = self._is_retriable_lock_error(e)
+                if self._try_clear_stale_lock(original):
+                    continue
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (2**attempt))
+                    continue
                 raise DatabaseLockedError(self.db_path, e) from e
-            finally:
-                if conn:
-                    conn.close()
 
         if last_error:
             raise DatabaseLockedError(self.db_path, last_error)
@@ -314,30 +294,21 @@ class DatabaseManager:
         self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
     ) -> list[dict[str, Any]]:
         """Execute a read query and return results as dictionaries."""
-        last_error: Exception | None = None
+        last_error: OperationalError | None = None
         for attempt in range(self.max_retries):
-            conn = None
             try:
-                conn = self._connect()
-                cursor = conn.execute(sql, params or [])
-                rows = cursor.fetchall()
-                if not rows:
-                    return []
-                desc = cursor.description or []
-                columns = [d[0] for d in desc]
-                return [dict(zip(columns, row, strict=False)) for row in rows]
-            except duckdb.IOException as e:
+                with self._engine.connect() as conn:
+                    cursor = conn.exec_driver_sql(sql, tuple(params) if params else ())
+                    return [dict(row) for row in cursor.mappings()]
+            except OperationalError as e:
                 last_error = e
-                if "lock" in str(e).lower():
-                    if self._try_clear_stale_lock(e):
-                        continue
-                    if attempt < self.max_retries - 1:
-                        time.sleep(self.retry_delay * (2**attempt))
-                        continue
+                original = self._is_retriable_lock_error(e)
+                if self._try_clear_stale_lock(original):
+                    continue
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (2**attempt))
+                    continue
                 raise DatabaseLockedError(self.db_path, e) from e
-            finally:
-                if conn:
-                    conn.close()
 
         if last_error:
             raise DatabaseLockedError(self.db_path, last_error)
@@ -347,38 +318,36 @@ class DatabaseManager:
         self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
     ) -> dict[str, Any] | None:
         """Execute a read query and return the first result as a dictionary."""
-        last_error: Exception | None = None
+        last_error: OperationalError | None = None
         for attempt in range(self.max_retries):
-            conn = None
             try:
-                conn = self._connect()
-                cursor = conn.execute(sql, params or [])
-                row = cursor.fetchone()
-                if row is None:
-                    return None
-                desc = cursor.description or []
-                columns = [d[0] for d in desc]
-                return dict(zip(columns, row, strict=False))
-            except duckdb.IOException as e:
+                with self._engine.connect() as conn:
+                    cursor = conn.exec_driver_sql(sql, tuple(params) if params else ())
+                    row = cursor.mappings().first()
+                    return dict(row) if row is not None else None
+            except OperationalError as e:
                 last_error = e
-                if "lock" in str(e).lower():
-                    if self._try_clear_stale_lock(e):
-                        continue
-                    if attempt < self.max_retries - 1:
-                        time.sleep(self.retry_delay * (2**attempt))
-                        continue
+                original = self._is_retriable_lock_error(e)
+                if self._try_clear_stale_lock(original):
+                    continue
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (2**attempt))
+                    continue
                 raise DatabaseLockedError(self.db_path, e) from e
-            finally:
-                if conn:
-                    conn.close()
 
         if last_error:
             raise DatabaseLockedError(self.db_path, last_error)
         return None
 
     def close(self) -> None:
-        """Close the database manager (no-op, connections are short-lived)."""
-        pass  # Connections are short-lived, nothing to close
+        """Dispose the engine's connection pool.
+
+        Safe to call even though connections are short-lived: NullPool has
+        nothing pooled to discard, and the engine stays usable afterward -
+        dispose() only clears idle pooled connections, it doesn't tear down
+        the engine.
+        """
+        self._engine.dispose()
 
     def __del__(self) -> None:
         """Cleanup (no-op, connections are short-lived)."""

@@ -1,9 +1,4 @@
-"""Alembic-driven schema migrations for the DuckDB backend.
-
-Only the migration step goes through SQLAlchemy/Alembic; DatabaseManager's
-regular query/execute hot path keeps using raw duckdb connections (that
-wholesale swap is a separate, later piece of work).
-"""
+"""Alembic-driven schema migrations for the DuckDB backend."""
 
 from __future__ import annotations
 
@@ -19,9 +14,12 @@ IN_MEMORY_DB_PATH = ":memory:"
 _MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
-def _sqlalchemy_url(db_path: str) -> str:
-    # DuckDB's ":memory:" is a magic token, not a real path - resolving it
-    # would silently create a file literally named ":memory:" on disk.
+def sqlalchemy_url(db_path: str) -> str:
+    """Build the duckdb_engine URL for db_path.
+
+    DuckDB's ":memory:" is a magic token, not a real path - resolving it
+    would silently create a file literally named ":memory:" on disk.
+    """
     url_path = db_path if db_path == IN_MEMORY_DB_PATH else str(Path(db_path).resolve())
     return f"duckdb:///{url_path}"
 
@@ -29,7 +27,7 @@ def _sqlalchemy_url(db_path: str) -> str:
 def _alembic_config(db_path: str) -> Config:
     cfg = Config()
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", _sqlalchemy_url(db_path))
+    cfg.set_main_option("sqlalchemy.url", sqlalchemy_url(db_path))
     return cfg
 
 
@@ -52,7 +50,7 @@ def _needs_legacy_stamp(db_path: str) -> bool:
     _run_migrations_with_retry already catches, instead of an unhandled
     duckdb.IOException bypassing that retry loop entirely.
     """
-    engine = create_engine(_sqlalchemy_url(db_path))
+    engine = create_engine(sqlalchemy_url(db_path))
     try:
         with engine.connect() as connection:
             if _table_exists(connection, "alembic_version"):
