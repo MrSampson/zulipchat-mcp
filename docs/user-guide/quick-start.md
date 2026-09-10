@@ -11,7 +11,7 @@ Save it as `~/.zuliprc`.
 ## 2. Start the server
 
 ```bash
-uvx zulipchat-mcp --zulip-config-file ~/.zuliprc
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```
 
 If your client manages MCP servers for you, use the same command in client config.
@@ -21,7 +21,7 @@ If your client manages MCP servers for you, use the same command in client confi
 Example with Claude Code:
 
 ```bash
-claude mcp add zulipchat -- uvx zulipchat-mcp --zulip-config-file ~/.zuliprc
+claude mcp add zulipchat -- uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```
 
 Then ask the assistant to call `server_info`.
@@ -43,13 +43,13 @@ Default mode uses 20 core tools.
 Enable the full 60-tool surface when needed:
 
 ```bash
-uvx zulipchat-mcp --zulip-config-file ~/.zuliprc --extended-tools
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc --extended-tools
 ```
 
 ## Dual identity (user + bot)
 
 ```bash
-uvx zulipchat-mcp \
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp \
   --zulip-config-file ~/.zuliprc \
   --zulip-bot-config-file ~/.zuliprc-bot
 ```

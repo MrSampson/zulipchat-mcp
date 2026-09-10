@@ -7,7 +7,7 @@ This page documents all runtime configuration for ZulipChat MCP v0.7.1.
 Use a `zuliprc` file and pass it explicitly:
 
 ```bash
-uvx zulipchat-mcp --zulip-config-file ~/.zuliprc
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```
 
 ## Credential sources
@@ -94,7 +94,7 @@ For credentials, `zuliprc` is the intended primary path. Environment credentials
 Dual identity is optional.
 
 ```bash
-uvx zulipchat-mcp \
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp \
   --zulip-config-file ~/.zuliprc \
   --zulip-bot-config-file ~/.zuliprc-bot
 ```

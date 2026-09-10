@@ -10,6 +10,8 @@ Antigravity's MCP integration surface is still evolving publicly.
     "zulipchat": {
       "command": "uvx",
       "args": [
+        "--from",
+        "zulipchat-mcp[duckdb]",
         "zulipchat-mcp",
         "--zulip-config-file",
         "/home/you/.zuliprc"
