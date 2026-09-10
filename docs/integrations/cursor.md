@@ -10,6 +10,8 @@ Cursor uses MCP JSON configuration compatible with stdio MCP servers.
     "zulipchat": {
       "command": "uvx",
       "args": [
+        "--from",
+        "zulipchat-mcp[duckdb]",
         "zulipchat-mcp",
         "--zulip-config-file",
         "/home/you/.zuliprc"

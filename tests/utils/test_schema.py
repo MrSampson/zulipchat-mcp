@@ -11,7 +11,7 @@ from typing import Any
 import duckdb
 from sqlalchemy import Boolean, Column, DateTime, DefaultClause, Integer, Table, Text
 
-from src.zulipchat_mcp.utils.database import DatabaseManager
+from src.zulipchat_mcp.utils.database import DuckDBDatabaseManager
 from src.zulipchat_mcp.utils.schema import metadata
 
 EXPECTED_TABLES: dict[str, dict[str, object]] = {
@@ -362,9 +362,9 @@ def test_schema_matches_the_ddl_database_py_actually_executes(tmp_path: Path) ->
     both places.
     """
     db_path = str(tmp_path / "schema_check.duckdb")
-    DatabaseManager._instance = None
-    DatabaseManager(db_path)
-    DatabaseManager._instance = None
+    DuckDBDatabaseManager._instance = None
+    DuckDBDatabaseManager(db_path)
+    DuckDBDatabaseManager._instance = None
 
     conn = duckdb.connect(db_path, read_only=True)
     try:
@@ -420,9 +420,9 @@ def test_migration_ddl_matches_foreign_keys_and_server_defaults(
     happens to (no longer) be built from.
     """
     db_path = str(tmp_path / "constraints_check.duckdb")
-    DatabaseManager._instance = None
-    DatabaseManager(db_path)
-    DatabaseManager._instance = None
+    DuckDBDatabaseManager._instance = None
+    DuckDBDatabaseManager(db_path)
+    DuckDBDatabaseManager._instance = None
 
     conn = duckdb.connect(db_path, read_only=True)
     try:

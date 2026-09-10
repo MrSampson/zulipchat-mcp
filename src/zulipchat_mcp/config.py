@@ -6,8 +6,20 @@ Supports zuliprc files and environment-variable credentials.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+try:
+    from enum import StrEnum  # type: ignore[attr-defined]
+except ImportError:
+    # Python 3.10 compatibility: StrEnum added in Python 3.11
+    from enum import Enum
+
+    class StrEnum(str, Enum):  # type: ignore
+        """String Enum for Python 3.10 compatibility."""
+
+        pass
+
 
 if TYPE_CHECKING:
     from .core.client import ZulipClientWrapper
@@ -34,6 +46,36 @@ except ImportError:
     pass
 
 
+class DatabaseBackend(StrEnum):
+    """Selectable persistence backends for ZulipChat MCP state."""
+
+    DUCKDB = "duckdb"
+    SQLITE = "sqlite"
+    POSTGRES = "postgres"
+
+
+def _default_db_path(backend: DatabaseBackend) -> str:
+    """DuckDB and SQLite each get their own default file, so switching
+    DATABASE_BACKEND never silently points at the other backend's file.
+    """
+    if backend is DatabaseBackend.SQLITE:
+        return ".mcp/zulipchat/zulipchat.sqlite3"
+    return ".mcp/zulipchat/zulipchat.duckdb"
+
+
+@dataclass
+class DatabaseConfig:
+    """Persistence backend selection and connection settings."""
+
+    backend: DatabaseBackend = DatabaseBackend.DUCKDB  # type: ignore
+    path: str | None = None  # sqlite/duckdb file path
+    postgres_host: str | None = None
+    postgres_port: int = 5432
+    postgres_db: str | None = None
+    postgres_user: str | None = None
+    postgres_password: str | None = None
+
+
 @dataclass
 class ZulipConfig:
     """Zulip configuration settings."""
@@ -50,6 +92,7 @@ class ZulipConfig:
     bot_name: str = "Claude Code"
     bot_avatar_url: str | None = None
     bot_config_file: str | None = None
+    database: DatabaseConfig = field(default_factory=DatabaseConfig)
 
 
 class ConfigManager:
@@ -96,6 +139,7 @@ class ConfigManager:
             bot_email=self._env("ZULIP_BOT_EMAIL"),
             bot_api_key=self._env("ZULIP_BOT_API_KEY"),
             bot_config_file=final_bot_config_file,
+            database=self._load_database_config(),
         )
 
     def _find_default_config(self) -> str | None:
@@ -136,6 +180,59 @@ class ConfigManager:
     def _get_bot_config_file(self) -> str | None:
         """Get bot config file path."""
         return self._env("ZULIP_BOT_CONFIG_FILE")
+
+    def _load_database_config(self) -> DatabaseConfig:
+        """Read DATABASE_BACKEND/ZULIPCHAT_DB_PATH/POSTGRES_* into a DatabaseConfig.
+
+        Raises ValueError on an unrecognized DATABASE_BACKEND rather than
+        silently falling back to duckdb - a typo here should fail loudly at
+        startup, not switch someone's data to a different empty backend.
+
+        Likewise raises when DATABASE_BACKEND=postgres is missing any of the
+        connection fields that have no sensible default, rather than letting a
+        literal `None` reach the connection URL and fail far from its cause.
+        POSTGRES_PASSWORD is deliberately not required - trust/peer/IAM auth
+        deployments legitimately have no password.
+        """
+        backend_raw = self._env("DATABASE_BACKEND") or DatabaseBackend.DUCKDB.value  # type: ignore
+        try:
+            backend = DatabaseBackend(backend_raw.lower())
+        except ValueError as exc:
+            valid = ", ".join(b.value for b in DatabaseBackend)  # type: ignore
+            raise ValueError(
+                f"Invalid DATABASE_BACKEND={backend_raw!r}. Must be one of: {valid}"
+            ) from exc
+
+        port_raw = self._env("POSTGRES_PORT")
+        host = self._env("POSTGRES_HOST")
+        dbname = self._env("POSTGRES_DB")
+        user = self._env("POSTGRES_USER")
+
+        if backend is DatabaseBackend.POSTGRES:
+            missing = [
+                name
+                for name, value in (
+                    ("POSTGRES_HOST", host),
+                    ("POSTGRES_DB", dbname),
+                    ("POSTGRES_USER", user),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ValueError(
+                    "DATABASE_BACKEND=postgres requires "
+                    f"{', '.join(missing)} to be set."
+                )
+
+        return DatabaseConfig(
+            backend=backend,
+            path=self._env("ZULIPCHAT_DB_PATH") or _default_db_path(backend),
+            postgres_host=host,
+            postgres_port=int(port_raw) if port_raw else 5432,
+            postgres_db=dbname,
+            postgres_user=user,
+            postgres_password=self._env("POSTGRES_PASSWORD"),
+        )
 
     def _get_debug(self) -> bool:
         """Get debug mode setting."""

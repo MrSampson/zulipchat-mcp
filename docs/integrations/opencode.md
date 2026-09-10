@@ -12,6 +12,8 @@ OpenCode uses an `mcp` block in `opencode.json` (or your OpenCode config file).
       "enabled": true,
       "command": [
         "uvx",
+        "--from",
+        "zulipchat-mcp[duckdb]",
         "zulipchat-mcp",
         "--zulip-config-file",
         "/home/you/.zuliprc"

@@ -2,7 +2,7 @@
 
 ## Current Status (v0.7.3-beta.1)
 
-**Published**: [PyPI](https://pypi.org/project/zulipchat-mcp/) | Install: `uvx zulipchat-mcp`
+**Published**: [PyPI](https://pypi.org/project/zulipchat-mcp/) | Install: `uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp`
 
 ## Project Structure & Module Organization
 - Source code lives in `src/zulipchat_mcp/`:
@@ -13,7 +13,7 @@
 ## Build, Test, and Development Commands
 - `uv sync` — install dependencies.
 - `uv run zulipchat-mcp --zulip-config-file ~/.zuliprc [--enable-listener]` — run server locally.
-- `uvx zulipchat-mcp` — quick run via uvx shim.
+- `uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp` — quick run via uvx shim (`[duckdb]` is required - duckdb/duckdb-engine are an opt-in extra, not bundled by default).
 - `uv run pytest -q` — run tests. Use `-m "not slow and not integration"` to skip long tests; `--cov=src` for coverage. Gate is set to 60%.
 - `uv run ruff check .` — lint; use Black on changed Python files; `uv run mypy src` — type-check.
 
@@ -43,7 +43,7 @@ In the 2026-07-28 stateless protocol (FastMCP 4+), MCP sampling was removed from
 ### Stateless HTTP Transport
 - `--transport http` serves on streamable-HTTP (port 8000 by default).
 - Authentication: Set `--auth-token` or `ZULIPCHAT_HTTP_AUTH_TOKEN` (Bearer token auth). Required when binding beyond `127.0.0.1`.
-- **Multi-replica note**: DuckDB persistence is single-writer. In multi-replica HTTP deployments, ensure each replica points to a distinct DuckDB path or use stdio/single-instance mode.
+- **Multi-replica note**: the default DuckDB/SQLite backends are single-writer file databases. When deploying multiple HTTP replicas, either point each instance at a distinct file, run a single-instance deployment, or set `DATABASE_BACKEND=postgres` (install with the `postgres` extra) for a real multi-writer backend.
 
 ### Bidirectional Agent Communication (v0.4+)
 Full agent-to-user messaging pipeline available in `src/zulipchat_mcp/tools/agents.py`:
@@ -70,14 +70,14 @@ New `src/zulipchat_mcp/core/emoji_registry.py` enforces approved emoji for agent
 
 ## Distribution & Installation Testing
 - **Installation Methods**: Three primary distribution channels:
-  - `uvx zulipchat-mcp` (PyPI - fastest, pre-built wheels)
-  - `uvx --from git+https://github.com/akougkas/zulipchat-mcp.git zulipchat-mcp` (GitHub - builds from source)
-  - `uvx --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ zulipchat-mcp` (TestPyPI - for pre-release testing)
+  - `uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp` (PyPI - fastest, pre-built wheels)
+  - `uvx --from 'zulipchat-mcp[duckdb] @ git+https://github.com/akougkas/zulipchat-mcp.git' zulipchat-mcp` (GitHub - builds from source)
+  - `uvx --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ 'zulipchat-mcp[duckdb]'` (TestPyPI - for pre-release testing)
 - **Credential Loading**: Supports both zuliprc files and env vars. For config-file paths, environment variables (`ZULIP_CONFIG_FILE`, `ZULIP_BOT_CONFIG_FILE`) are checked before CLI flags; Zulip credentials can be loaded from either zuliprc or env.
 - **Claude Code Integration**: Use `--` separator for proper argument passing:
   ```bash
   # Correct syntax (tested)
-  claude mcp add zulipchat -e ZULIP_EMAIL=bot@org.com -e ZULIP_API_KEY=key -e ZULIP_SITE=https://org.zulipchat.com -- uvx --from git+https://github.com/akougkas/zulipchat-mcp.git zulipchat-mcp
+  claude mcp add zulipchat -e ZULIP_EMAIL=bot@org.com -e ZULIP_API_KEY=key -e ZULIP_SITE=https://org.zulipchat.com -- uvx --from 'zulipchat-mcp[duckdb] @ git+https://github.com/akougkas/zulipchat-mcp.git' zulipchat-mcp
   ```
 - **Testing Before Release**: Always run the fake-credential MCP stdio smoke from both the project environment and the built wheel. Use real Zulip credentials only for targeted manual checks of behavior that actually requires Zulip API access.
 

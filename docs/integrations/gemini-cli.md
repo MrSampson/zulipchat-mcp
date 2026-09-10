@@ -3,7 +3,7 @@
 ## Add server from CLI
 
 ```bash
-gemini mcp add zulipchat uvx zulipchat-mcp --zulip-config-file ~/.zuliprc --scope user
+gemini mcp add zulipchat uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc --scope user
 ```
 
 ## Manual config (`~/.gemini/settings.json`)
@@ -14,6 +14,8 @@ gemini mcp add zulipchat uvx zulipchat-mcp --zulip-config-file ~/.zuliprc --scop
     "zulipchat": {
       "command": "uvx",
       "args": [
+        "--from",
+        "zulipchat-mcp[duckdb]",
         "zulipchat-mcp",
         "--zulip-config-file",
         "/home/you/.zuliprc"

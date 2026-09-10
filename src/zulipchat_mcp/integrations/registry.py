@@ -9,11 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
 from .. import __version__
-from .claude_code_package import export_claude_code_package
+from .claude_code_package import UVX_PACKAGE_SPEC, export_claude_code_package
 
 CLIENTS = [
     "claude-code",
@@ -34,7 +35,13 @@ def _build_base_config(
     zulip_bot_config_file: str | None,
     extended_tools: bool,
 ) -> dict[str, Any]:
-    args = ["zulipchat-mcp", "--zulip-config-file", zulip_config_file]
+    args = [
+        "--from",
+        UVX_PACKAGE_SPEC,
+        "zulipchat-mcp",
+        "--zulip-config-file",
+        zulip_config_file,
+    ]
     if zulip_bot_config_file:
         args.extend(["--zulip-bot-config-file", zulip_bot_config_file])
     if extended_tools:
@@ -76,8 +83,11 @@ def _render_remote_for_client(client: str, url: str, token: str | None) -> str:
 
 def _render_for_client(client: str, base: dict[str, Any]) -> str:
     if client == "claude-code":
+        # shlex.quote: base["args"] now includes "zulipchat-mcp[duckdb]" -
+        # unquoted, the brackets are shell glob metacharacters that some
+        # shells (zsh, by default) error on rather than pass through.
         return "claude mcp add zulipchat -- " + " ".join(
-            [base["command"], *[str(arg) for arg in base["args"]]]
+            [base["command"], *[shlex.quote(str(arg)) for arg in base["args"]]]
         )
 
     if client in {

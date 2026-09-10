@@ -15,7 +15,7 @@ Each page below includes copy-paste setup for one client.
 ## Shared baseline command
 
 ```bash
-uvx zulipchat-mcp --zulip-config-file ~/.zuliprc
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```
 
 ## Optional flags

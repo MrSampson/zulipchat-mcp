@@ -5,17 +5,21 @@ brand new database file, and one already created by the old hand-rolled
 `schema_migrations`-table migrator that predates Alembic.
 """
 
+import sqlite3
 from pathlib import Path
 
 import duckdb
 import pytest
 from alembic import command
 from sqlalchemy import create_engine
+from sqlalchemy.engine import URL, make_url
 
 from src.zulipchat_mcp.utils.migrations import (
     IN_MEMORY_DB_PATH,
     _alembic_config,
     run_migrations,
+    run_postgres_migrations,
+    run_sqlite_migrations,
 )
 from src.zulipchat_mcp.utils.schema import metadata
 
@@ -153,3 +157,116 @@ def test_downgrade_from_head_drops_every_real_table(tmp_path: Path) -> None:
     command.downgrade(_alembic_config(db_path), "base")
 
     assert _table_names(db_path).isdisjoint(_REAL_TABLE_NAMES)
+
+
+def _sqlite_table_names(db_path: str) -> set[str]:
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+        return {r[0] for r in rows}
+    finally:
+        conn.close()
+
+
+def _sqlite_alembic_version(db_path: str) -> str | None:
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
+def test_sqlite_fresh_database_creates_all_real_tables(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "fresh.sqlite3")
+
+    run_sqlite_migrations(db_path)
+
+    assert _sqlite_table_names(db_path) >= _REAL_TABLE_NAMES
+
+
+def test_sqlite_fresh_database_ends_up_at_the_initial_revision(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "fresh.sqlite3")
+
+    run_sqlite_migrations(db_path)
+
+    assert _sqlite_alembic_version(db_path) == "0001"
+
+
+def test_sqlite_in_memory_database_does_not_leak_a_literal_memory_file_to_disk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    run_sqlite_migrations(IN_MEMORY_DB_PATH)
+
+    assert not (tmp_path / IN_MEMORY_DB_PATH).exists()
+
+
+def test_sqlite_running_twice_on_the_same_database_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    db_path = str(tmp_path / "fresh.sqlite3")
+
+    run_sqlite_migrations(db_path)
+    run_sqlite_migrations(db_path)
+
+    assert _sqlite_table_names(db_path) >= _REAL_TABLE_NAMES
+
+
+def test_run_postgres_migrations_builds_config_without_legacy_check(monkeypatch):
+    """No real Postgres needed: prove run_postgres_migrations never calls
+    the DuckDB-only legacy-stamp check, by making that check raise if
+    called - if run_postgres_migrations tried to call it, this test fails
+    loudly instead of silently connecting to a bogus DuckDB path.
+    """
+
+    def _boom(db_path: str) -> bool:
+        raise AssertionError("_needs_legacy_stamp must not run for postgres")
+
+    monkeypatch.setattr("src.zulipchat_mcp.utils.migrations._needs_legacy_stamp", _boom)
+    calls = []
+    monkeypatch.setattr(
+        "src.zulipchat_mcp.utils.migrations.command.upgrade",
+        lambda cfg, rev: calls.append(rev),
+    )
+
+    run_postgres_migrations("postgresql+psycopg://u:p@host:5432/db")
+
+    assert calls == ["head"]
+
+
+def test_run_postgres_migrations_accepts_url_object_with_percent_password(monkeypatch):
+    """Alembic's Config is a ConfigParser with BasicInterpolation: an
+    unescaped `%` in the password raised ValueError with the full URL -
+    password included - in the exception message, which server.py then
+    logged verbatim. The `%` must be escaped, and the real (unmasked)
+    password must still reach the config.
+    """
+    captured = {}
+    monkeypatch.setattr(
+        "src.zulipchat_mcp.utils.migrations.command.upgrade",
+        lambda cfg, rev: captured.update(url=cfg.get_main_option("sqlalchemy.url")),
+    )
+
+    url = URL.create(
+        "postgresql+psycopg",
+        username="mcp",
+        password="pa%ss@word",
+        host="db.internal",
+        port=5432,
+        database="zulipchat",
+    )
+
+    run_postgres_migrations(url)
+
+    # get_main_option() runs the interpolation that used to crash; the
+    # round-tripped value must be the real password, not a masked one.
+    assert "***" not in captured["url"]
+    round_tripped = make_url(captured["url"])
+    assert round_tripped.password == "pa%ss@word"
+    assert round_tripped.host == "db.internal"
+    assert round_tripped.username == "mcp"
+    assert round_tripped.database == "zulipchat"

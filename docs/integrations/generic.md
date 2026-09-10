@@ -10,6 +10,8 @@ Most MCP clients accept one of these two JSON shapes.
     "zulipchat": {
       "command": "uvx",
       "args": [
+        "--from",
+        "zulipchat-mcp[duckdb]",
         "zulipchat-mcp",
         "--zulip-config-file",
         "/home/you/.zuliprc"
@@ -28,6 +30,8 @@ Most MCP clients accept one of these two JSON shapes.
       "type": "stdio",
       "command": "uvx",
       "args": [
+        "--from",
+        "zulipchat-mcp[duckdb]",
         "zulipchat-mcp",
         "--zulip-config-file",
         "/home/you/.zuliprc"

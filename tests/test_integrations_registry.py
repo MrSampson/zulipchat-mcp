@@ -40,6 +40,47 @@ def test_print_codex_includes_extended_flag(monkeypatch, capsys):
     assert '"--extended-tools"' in output
 
 
+def test_print_includes_duckdb_extra(monkeypatch, capsys):
+    """duckdb/duckdb-engine are an opt-in extra (pyproject.toml) - every
+    generated uvx invocation must request it, or the generated config
+    installs a server with no working database backend.
+    """
+    _run_main(
+        monkeypatch,
+        [
+            "print",
+            "--client",
+            "generic",
+            "--zulip-config-file",
+            "/home/test/.zuliprc",
+        ],
+    )
+    payload = json.loads(capsys.readouterr().out)
+    args = payload["mcpServers"]["zulipchat"]["args"]
+    assert args[0] == "--from"
+    assert args[1] == "zulipchat-mcp[duckdb]"
+    assert "zulipchat-mcp" in args
+
+
+def test_print_claude_code_shell_quotes_the_extras_bracket(monkeypatch, capsys):
+    """The claude-code render is a literal shell command the user pastes -
+    the unquoted `[duckdb]` extra would be a glob metacharacter in some
+    shells (e.g. zsh errors on a non-matching glob by default).
+    """
+    _run_main(
+        monkeypatch,
+        [
+            "print",
+            "--client",
+            "claude-code",
+            "--zulip-config-file",
+            "/home/test/.zuliprc",
+        ],
+    )
+    output = capsys.readouterr().out
+    assert "'zulipchat-mcp[duckdb]'" in output
+
+
 def test_print_vscode_returns_servers_shape(monkeypatch, capsys):
     """VS Code render should use `servers` key with stdio type."""
     _run_main(

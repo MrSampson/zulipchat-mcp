@@ -7,7 +7,9 @@ MCP client configuration for major clients.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -305,6 +307,13 @@ def get_mcp_client_config_path(client_type: str) -> Path | None:
     return None
 
 
+# uvx needs an explicit --from with the extra to get a working backend, since
+# duckdb/duckdb-engine are no longer bundled by default (see pyproject.toml's
+# [project.optional-dependencies]) - a bare `uvx zulipchat-mcp` installs a
+# server with no working database backend.
+_UVX_PACKAGE_SPEC = "zulipchat-mcp[duckdb]"
+
+
 def _build_args(
     user_config: dict[str, Any],
     bot_config: dict[str, Any] | None,
@@ -314,7 +323,13 @@ def _build_args(
 ) -> list[str]:
     """Build MCP server command args."""
     if use_uvx:
-        args = ["zulipchat-mcp", "--zulip-config-file", user_config["path"]]
+        args = [
+            "--from",
+            _UVX_PACKAGE_SPEC,
+            "zulipchat-mcp",
+            "--zulip-config-file",
+            user_config["path"],
+        ]
     else:
         args = ["run", "zulipchat-mcp", "--zulip-config-file", user_config["path"]]
 
@@ -333,19 +348,27 @@ def generate_mcp_config(
     *,
     extended_tools: bool = False,
     use_uvx: bool = False,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Generate MCP server configuration."""
-    command = shutil.which("uv") or "uv"
+    # A plain `uv <script>` (no `run`/`uvx` subcommand) is not a valid uv
+    # invocation - the uvx branch must actually invoke `uvx`, not `uv`.
+    command = (
+        (shutil.which("uvx") or "uvx") if use_uvx else (shutil.which("uv") or "uv")
+    )
     args = _build_args(
         user_config,
         bot_config,
         extended_tools=extended_tools,
         use_uvx=use_uvx,
     )
-    return {
+    config: dict[str, Any] = {
         "command": command,
         "args": args,
     }
+    if env:
+        config["env"] = env
+    return config
 
 
 def generate_claude_code_command(
@@ -353,6 +376,7 @@ def generate_claude_code_command(
     bot_config: dict[str, Any] | None = None,
     *,
     extended_tools: bool = False,
+    env: dict[str, str] | None = None,
 ) -> str:
     """Generate `claude mcp add` command for Claude Code."""
     parts = ["claude mcp add zulipchat"]
@@ -361,7 +385,13 @@ def generate_claude_code_command(
     if bot_config:
         parts.append(f"-e ZULIP_BOT_CONFIG_FILE={bot_config['path']}")
 
-    cmd_tail = "-- uvx zulipchat-mcp"
+    for key, value in (env or {}).items():
+        # shlex.quote: this string is printed for the user to copy/paste into
+        # a shell, and a POSTGRES_PASSWORD containing a space, $, " or '
+        # would otherwise break the command or shell-expand unexpectedly.
+        parts.append(f"-e {key}={shlex.quote(value)}")
+
+    cmd_tail = f"-- uvx --from '{_UVX_PACKAGE_SPEC}' zulipchat-mcp"
     if extended_tools:
         cmd_tail += " --extended-tools"
     parts.append(cmd_tail)
@@ -405,20 +435,51 @@ def write_config_to_file(
 
 def _render_vscode_config(base: dict[str, Any]) -> dict[str, Any]:
     """Render VS Code/Copilot config shape."""
-    return {
+    config: dict[str, Any] = {
         "type": "stdio",
         "command": base["command"],
         "args": base["args"],
     }
+    if base.get("env"):
+        config["env"] = base["env"]
+    return config
 
 
 def _render_opencode_config(base: dict[str, Any]) -> dict[str, Any]:
     """Render OpenCode config shape."""
-    return {
+    config: dict[str, Any] = {
         "type": "local",
         "enabled": True,
         "command": [base["command"], *base["args"]],
     }
+    if base.get("env"):
+        # OpenCode's exact env field name is not verified against upstream
+        # docs from within this repo; "env" matches the convention used by
+        # every other renderer in this file.
+        config["env"] = base["env"]
+    return config
+
+
+def _toml_escape(value: str) -> str:
+    """Escape a value for a TOML basic string. Without this a value
+    containing `"` or `\\` (a Postgres password, say) produces invalid TOML
+    the user then pastes into their Codex config.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _render_codex_toml(base: dict[str, Any]) -> str:
+    """Render the Codex config.toml `[mcp_servers.zulipchat]` block."""
+    args = ", ".join(f'"{_toml_escape(str(arg))}"' for arg in base["args"])
+    command = _toml_escape(str(base["command"]))
+    toml_block = f'\n[mcp_servers.zulipchat]\ncommand = "{command}"\nargs = [{args}]\n'
+    if base.get("env"):
+        env_pairs = ", ".join(
+            f'{key} = "{_toml_escape(str(value))}"'
+            for key, value in base["env"].items()
+        )
+        toml_block += f"env = {{ {env_pairs} }}\n"
+    return toml_block
 
 
 def _print_config_block(title: str, payload: dict[str, Any]) -> None:
@@ -434,6 +495,47 @@ def _select_tool_mode() -> bool:
     print("  2. Extended mode (60 tools)")
     choice = prompt("Choice", default="1")
     return choice.strip() == "2"
+
+
+def prompt_database_backend() -> dict[str, str]:
+    """Prompt for a database backend and return the env vars to plumb into
+    the generated MCP config. Empty dict means "don't set anything" - the
+    server's own DATABASE_BACKEND default (duckdb) applies.
+    """
+    print(f"\n{BOLD}Step: Database Backend (Optional){RESET}")
+    print("  1. DuckDB (default - no setup needed)")
+    print("  2. SQLite (no extra dependency)")
+    print("  3. Postgres (for multi-replica deployments)")
+    print("  4. Skip (use the server's default)")
+    choice = prompt("Choice", default="4")
+
+    if choice == "1":
+        return {"DATABASE_BACKEND": "duckdb"}
+    if choice == "2":
+        return {"DATABASE_BACKEND": "sqlite"}
+    if choice == "3":
+        host = prompt("Postgres host")
+        port = prompt("Postgres port", default="5432")
+        dbname = prompt("Postgres database name")
+        user = prompt("Postgres user")
+        print(
+            f"{YELLOW}Note: this password is written in plaintext into "
+            f"your MCP client's config file (that's how MCP client configs "
+            f"work) - the terminal prompt itself is hidden, but the saved "
+            f"file is not encrypted.{RESET}"
+        )
+        # getpass, not prompt(): prompt() wraps bare input(), which echoes
+        # the password to the terminal (and into scrollback/screen-shares).
+        password = getpass.getpass("Postgres password: ")
+        return {
+            "DATABASE_BACKEND": "postgres",
+            "POSTGRES_HOST": host,
+            "POSTGRES_PORT": port,
+            "POSTGRES_DB": dbname,
+            "POSTGRES_USER": user,
+            "POSTGRES_PASSWORD": password,
+        }
+    return {}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -480,6 +582,9 @@ def main(argv: list[str] | None = None) -> None:
     # Step 4: Core vs extended
     extended_tools = _select_tool_mode()
 
+    # Optional: database backend
+    database_env = prompt_database_backend()
+
     # Step 5: Generate configuration
     print(f"\n{BOLD}Step 5: Generate Configuration{RESET}")
     print("Which MCP client are you configuring?")
@@ -502,6 +607,7 @@ def main(argv: list[str] | None = None) -> None:
         bot_config,
         extended_tools=extended_tools,
         use_uvx=True,
+        env=database_env,
     )
 
     if client_choice == "1":
@@ -511,6 +617,7 @@ def main(argv: list[str] | None = None) -> None:
                 user_config,
                 bot_config,
                 extended_tools=extended_tools,
+                env=database_env,
             )
         )
         print()
@@ -536,10 +643,7 @@ def main(argv: list[str] | None = None) -> None:
     elif client_choice == "4":
         config_path = get_mcp_client_config_path("codex")
         print(f"\n{BOLD}Codex configuration (config.toml){RESET}")
-        args = ", ".join(f'"{arg}"' for arg in mcp_config["args"])
-        print(
-            f"\n[mcp_servers.zulipchat]\ncommand = \"{mcp_config['command']}\"\nargs = [{args}]\n"
-        )
+        print(_render_codex_toml(mcp_config))
         if config_path:
             print(f"Suggested path: {config_path}")
 

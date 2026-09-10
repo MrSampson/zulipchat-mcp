@@ -3,7 +3,7 @@
 ## Add server from CLI
 
 ```bash
-codex mcp add zulipchat uvx zulipchat-mcp --zulip-config-file ~/.zuliprc
+codex mcp add zulipchat uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```
 
 ## Manual config (`~/.codex/config.toml`)
@@ -11,7 +11,7 @@ codex mcp add zulipchat uvx zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```toml
 [mcp_servers.zulipchat]
 command = "uvx"
-args = ["zulipchat-mcp", "--zulip-config-file", "/home/you/.zuliprc"]
+args = ["--from", "zulipchat-mcp[duckdb]", "zulipchat-mcp", "--zulip-config-file", "/home/you/.zuliprc"]
 ```
 
 ## Extended mode
@@ -19,7 +19,7 @@ args = ["zulipchat-mcp", "--zulip-config-file", "/home/you/.zuliprc"]
 ```toml
 [mcp_servers.zulipchat]
 command = "uvx"
-args = ["zulipchat-mcp", "--zulip-config-file", "/home/you/.zuliprc", "--extended-tools"]
+args = ["--from", "zulipchat-mcp[duckdb]", "zulipchat-mcp", "--zulip-config-file", "/home/you/.zuliprc", "--extended-tools"]
 ```
 
 ## Notes

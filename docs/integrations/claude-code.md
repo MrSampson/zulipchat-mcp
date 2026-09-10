@@ -3,13 +3,13 @@
 ## Add the MCP server
 
 ```bash
-claude mcp add zulipchat -- uvx zulipchat-mcp --zulip-config-file ~/.zuliprc
+claude mcp add zulipchat -- uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```
 
 ## Dual identity
 
 ```bash
-claude mcp add zulipchat -- uvx zulipchat-mcp \
+claude mcp add zulipchat -- uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp \
   --zulip-config-file ~/.zuliprc \
   --zulip-bot-config-file ~/.zuliprc-bot
 ```
@@ -17,7 +17,7 @@ claude mcp add zulipchat -- uvx zulipchat-mcp \
 ## Extended tool mode
 
 ```bash
-claude mcp add zulipchat -- uvx zulipchat-mcp \
+claude mcp add zulipchat -- uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp \
   --zulip-config-file ~/.zuliprc \
   --zulip-bot-config-file ~/.zuliprc-bot \
   --extended-tools
@@ -85,7 +85,7 @@ For session lifecycle updates and in-topic approval waits, the package uses the
 `zulipchat-mcp-hook` bridge:
 
 ```bash
-uvx zulipchat-mcp-hook \
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp-hook \
   --zulip-config-file ~/.zuliprc \
   --zulip-bot-config-file ~/.zuliprc-bot
 ```

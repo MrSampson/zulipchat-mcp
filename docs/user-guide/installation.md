@@ -5,7 +5,7 @@ Install ZulipChat MCP from PyPI, GitHub, or TestPyPI.
 ## Recommended install (PyPI)
 
 ```bash
-uvx zulipchat-mcp --zulip-config-file ~/.zuliprc
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```
 
 Interactive onboarding:
@@ -17,13 +17,13 @@ uvx --from zulipchat-mcp zulipchat-mcp-setup
 ## Install from GitHub
 
 ```bash
-uvx --from git+https://github.com/akougkas/zulipchat-mcp.git zulipchat-mcp --zulip-config-file ~/.zuliprc
+uvx --from 'zulipchat-mcp[duckdb] @ git+https://github.com/akougkas/zulipchat-mcp.git' zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```
 
 ## Install from TestPyPI
 
 ```bash
-uvx --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ zulipchat-mcp --zulip-config-file ~/.zuliprc
+uvx --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ 'zulipchat-mcp[duckdb]' --zulip-config-file ~/.zuliprc
 ```
 
 ## Local development install

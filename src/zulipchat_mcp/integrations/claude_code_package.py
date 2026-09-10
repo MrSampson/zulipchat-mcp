@@ -9,6 +9,12 @@ from typing import Any
 
 from .. import __version__
 
+# uvx needs an explicit --from with the extra to get a working backend, since
+# duckdb/duckdb-engine are no longer bundled by default (see pyproject.toml's
+# [project.optional-dependencies]) - a bare `uvx zulipchat-mcp` installs a
+# server with no working database backend. Shared with registry.py.
+UVX_PACKAGE_SPEC = "zulipchat-mcp[duckdb]"
+
 
 def _build_mcp_args(
     zulip_config_file: str,
@@ -16,7 +22,13 @@ def _build_mcp_args(
     *,
     extended_tools: bool,
 ) -> list[str]:
-    args = ["zulipchat-mcp", "--zulip-config-file", zulip_config_file]
+    args = [
+        "--from",
+        UVX_PACKAGE_SPEC,
+        "zulipchat-mcp",
+        "--zulip-config-file",
+        zulip_config_file,
+    ]
     if zulip_bot_config_file:
         args.extend(["--zulip-bot-config-file", zulip_bot_config_file])
     if extended_tools:
@@ -31,7 +43,7 @@ def _build_hook_command(
     command = [
         "uvx",
         "--from",
-        "zulipchat-mcp",
+        UVX_PACKAGE_SPEC,
         "zulipchat-mcp-hook",
         "--zulip-config-file",
         zulip_config_file,

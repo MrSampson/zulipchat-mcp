@@ -11,6 +11,8 @@ Use an MCP config file in workspace or user scope.
       "type": "stdio",
       "command": "uvx",
       "args": [
+        "--from",
+        "zulipchat-mcp[duckdb]",
         "zulipchat-mcp",
         "--zulip-config-file",
         "/home/you/.zuliprc"

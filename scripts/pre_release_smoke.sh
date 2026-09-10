@@ -112,7 +112,10 @@ if [[ -z "$WHEEL_PATH" || ! -f "$WHEEL_PATH" ]]; then
   echo "ERROR: Expected wheel not found in dist/" >&2
   exit 1
 fi
-uv pip install --prerelease=allow --python "$SMOKE_VENV/bin/python" "$WHEEL_PATH"
+# [duckdb], not the bare wheel: duckdb ships as an optional extra, and a
+# missing backend is a logged warning rather than a crash, so a bare install
+# would pass this gate with no working database backend at all.
+uv pip install --prerelease=allow --python "$SMOKE_VENV/bin/python" "$WHEEL_PATH[duckdb]"
 
 echo "==> Installed-wheel entrypoint smoke"
 "$SMOKE_VENV/bin/zulipchat-mcp" --version

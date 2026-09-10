@@ -305,7 +305,7 @@ def main() -> None:
         logger.error("Invalid Zulip configuration for Claude hook bridge")
         sys.exit(1)
 
-    init_database()
+    init_database(config_manager.config.database)
     coordinator = AgentCoordinator()
 
     agent_result = coordinator.register_agent(

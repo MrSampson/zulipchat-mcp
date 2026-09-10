@@ -48,12 +48,19 @@ class DatabaseManager:
                 if existing and existing.get("created_at") is not None
                 else now
             )
-            self._db.execute(
-                """
-                INSERT OR REPLACE INTO agent_profiles
-                (agent_id, agent_name, agent_type, owner_email, stream_name, topic_prefix, metadata, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+            self._db.upsert(
+                "agent_profiles",
+                [
+                    "agent_id",
+                    "agent_name",
+                    "agent_type",
+                    "owner_email",
+                    "stream_name",
+                    "topic_prefix",
+                    "metadata",
+                    "created_at",
+                    "updated_at",
+                ],
                 [
                     agent_id,
                     agent_name,
@@ -65,6 +72,7 @@ class DatabaseManager:
                     created_at,
                     now,
                 ],
+                "agent_id",
             )
             return {"status": "success", "agent_id": agent_id}
         except Exception as e:
@@ -132,13 +140,24 @@ class DatabaseManager:
                 if existing and existing.get("created_at") is not None
                 else now
             )
-            self._db.execute(
-                """
-                INSERT OR REPLACE INTO agent_sessions
-                (session_id, agent_id, external_session_id, stream_name, topic_name, owner_email,
-                 project_name, project_dir, host, status, metadata, created_at, updated_at, ended_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+            self._db.upsert(
+                "agent_sessions",
+                [
+                    "session_id",
+                    "agent_id",
+                    "external_session_id",
+                    "stream_name",
+                    "topic_name",
+                    "owner_email",
+                    "project_name",
+                    "project_dir",
+                    "host",
+                    "status",
+                    "metadata",
+                    "created_at",
+                    "updated_at",
+                    "ended_at",
+                ],
                 [
                     session_id,
                     agent_id,
@@ -155,6 +174,7 @@ class DatabaseManager:
                     now,
                     None if status not in {"completed", "failed", "cancelled"} else now,
                 ],
+                "session_id",
             )
             return {"status": "success", "session_id": session_id}
         except Exception as e:

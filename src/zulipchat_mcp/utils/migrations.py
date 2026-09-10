@@ -1,4 +1,4 @@
-"""Alembic-driven schema migrations for the DuckDB backend."""
+"""Alembic-driven schema migrations for the DuckDB, SQLite, and Postgres backends."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import Connection, Engine, create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.pool import NullPool
 
 INITIAL_REVISION = "0001"
@@ -25,6 +26,28 @@ def sqlalchemy_url(db_path: str) -> str:
     return f"duckdb:///{url_path}"
 
 
+def sqlite_sqlalchemy_url(db_path: str) -> str:
+    """Build the sqlite3 dialect URL for db_path. Same ':memory:' guard as
+    sqlalchemy_url() above - sqlite has its own native ':memory:' syntax,
+    but we keep the shared IN_MEMORY_DB_PATH constant and guard identically
+    across both file-based backends rather than special-casing per backend.
+
+    This guard only prevents ':memory:' from being resolved into a literal
+    file path - it does NOT make ':memory:' a usable end-to-end database.
+    Every NullPool checkout (including Alembic's own migration engine in
+    migrations/env.py) opens a distinct, empty in-memory database, so
+    migrated tables from one connection are invisible to the next. Both
+    this function and duckdb_engine's equivalent share the limitation
+    (pre-existing for DuckDB, unchanged here). Safe for what it's actually
+    used for today (proving no stray ':memory:' file is created on disk);
+    not a working in-memory fixture backend - do not rely on it for that
+    without first fixing the cross-engine sharing this docstring describes.
+    """
+    if db_path == IN_MEMORY_DB_PATH:
+        return "sqlite:///:memory:"
+    return f"sqlite:///{Path(db_path).resolve()}"
+
+
 def make_engine(db_path: str) -> Engine:
     """Build the shared duckdb_engine Engine for db_path.
 
@@ -39,11 +62,34 @@ def make_engine(db_path: str) -> Engine:
     )
 
 
-def _alembic_config(db_path: str) -> Config:
+def make_sqlite_engine(db_path: str) -> Engine:
+    """Build the shared sqlite3 Engine for db_path. NullPool for the same
+    file-lock-release reason as make_engine() above.
+    """
+    return create_engine(sqlite_sqlalchemy_url(db_path), poolclass=NullPool)
+
+
+def _alembic_config_for_url(url: str | URL) -> Config:
+    """Build an Alembic Config pointed at `url`.
+
+    Alembic's Config is a ConfigParser with BasicInterpolation, so a literal
+    `%` anywhere in the URL (commonly from a Postgres password) raises
+    ValueError - with the whole URL, password included, in the message.
+    Doubling `%` is Alembic's own documented escape and is a no-op for URLs
+    that contain none.
+
+    `render_as_string(hide_password=False)` is required for URL objects:
+    `str(url)` masks the password as `***`, which would break the connection.
+    """
     cfg = Config()
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", sqlalchemy_url(db_path))
+    url_str = url.render_as_string(hide_password=False) if isinstance(url, URL) else url
+    cfg.set_main_option("sqlalchemy.url", url_str.replace("%", "%%"))
     return cfg
+
+
+def _alembic_config(db_path: str) -> Config:
+    return _alembic_config_for_url(sqlalchemy_url(db_path))
 
 
 def _table_exists(connection: Connection, table_name: str) -> bool:
@@ -58,6 +104,9 @@ def _needs_legacy_stamp(db_path: str) -> bool:
     """True if this is a database from the pre-Alembic hand-rolled migrator:
     it already has all the real tables (tracked via its own schema_migrations
     table at version 1) but no alembic_version table yet.
+
+    DuckDB-only: sqlite and postgres are new backends with no pre-Alembic
+    installs to detect.
 
     Goes through the same SQLAlchemy/duckdb_engine path as the rest of
     run_migrations (rather than a raw duckdb connection) so lock contention
@@ -80,8 +129,25 @@ def _needs_legacy_stamp(db_path: str) -> bool:
         engine.dispose()
 
 
+def _run_migrations_for_url(
+    url: str | URL, *, check_legacy_stamp_path: str | None
+) -> None:
+    """Shared upgrade-to-head core for every backend.
+
+    check_legacy_stamp_path: pass the duckdb db_path to run the DuckDB-only
+    legacy-stamp check first; pass None for backends that never had a
+    pre-Alembic install (sqlite, postgres).
+    """
+    cfg = _alembic_config_for_url(url)
+    if check_legacy_stamp_path is not None and _needs_legacy_stamp(
+        check_legacy_stamp_path
+    ):
+        command.stamp(cfg, INITIAL_REVISION)
+    command.upgrade(cfg, "head")
+
+
 def run_migrations(db_path: str) -> None:
-    """Bring the database at db_path up to the latest schema revision.
+    """Bring the DuckDB database at db_path up to the latest schema revision.
 
     Safe to call on a brand new database file, one already at the latest
     revision (no-op), or one created by the old hand-rolled migrator (gets
@@ -89,8 +155,25 @@ def run_migrations(db_path: str) -> None:
     """
     if db_path != IN_MEMORY_DB_PATH:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    _run_migrations_for_url(sqlalchemy_url(db_path), check_legacy_stamp_path=db_path)
 
-    cfg = _alembic_config(db_path)
-    if _needs_legacy_stamp(db_path):
-        command.stamp(cfg, INITIAL_REVISION)
-    command.upgrade(cfg, "head")
+
+def run_sqlite_migrations(db_path: str) -> None:
+    """Bring the SQLite database at db_path up to the latest schema revision.
+
+    SQLite is a new backend - there are no pre-Alembic installs to stamp.
+    """
+    if db_path != IN_MEMORY_DB_PATH:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    _run_migrations_for_url(
+        sqlite_sqlalchemy_url(db_path), check_legacy_stamp_path=None
+    )
+
+
+def run_postgres_migrations(url: str | URL) -> None:
+    """Bring the Postgres database at url up to the latest schema revision.
+
+    Postgres is a new backend - there are no pre-Alembic installs to stamp,
+    and no local directory to create (a connection string, not a file path).
+    """
+    _run_migrations_for_url(url, check_legacy_stamp_path=None)
