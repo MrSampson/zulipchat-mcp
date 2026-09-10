@@ -12,8 +12,11 @@ per-test `tmp_path`.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -26,21 +29,29 @@ from src.zulipchat_mcp.utils.database import (
     SqliteDatabaseManager,
 )
 
+if TYPE_CHECKING:
+    from testcontainers.community.postgres import PostgresContainer
+
 
 @pytest.fixture(scope="session")
-def postgres_container() -> Iterator[Any]:
-    """A session-scoped real Postgres instance. Skips every test that
-    requests it (directly or via the `db` fixture) when Docker isn't
-    available, rather than failing the whole run.
+def postgres_container() -> Iterator[PostgresContainer]:
+    """A session-scoped real Postgres instance.
+
+    Locally, skips every test that requests it (directly or via the `db`
+    fixture) when Docker isn't available. In CI, Docker is guaranteed on
+    the `ubuntu-latest` runner this project uses, so a failure to start
+    there is a real regression - it must fail the run, not silently skip
+    it and report a false green on a job that tested nothing.
     """
     from testcontainers.community.postgres import PostgresContainer
 
     try:
         container = PostgresContainer("postgres:16-alpine")
         container.start()
-    except Exception as exc:  # pragma: no cover - depends on local Docker
+    except Exception as exc:
+        if os.environ.get("CI"):
+            raise
         pytest.skip(f"Postgres testcontainer unavailable (Docker?): {exc}")
-        return
 
     try:
         yield container
@@ -48,7 +59,7 @@ def postgres_container() -> Iterator[Any]:
         container.stop()
 
 
-def _postgres_url(container: Any) -> URL:
+def _postgres_url(container: PostgresContainer) -> URL:
     return URL.create(
         "postgresql+psycopg",
         username=container.username,
@@ -59,7 +70,7 @@ def _postgres_url(container: Any) -> URL:
     )
 
 
-def _reset_postgres_schema(container: Any) -> None:
+def _reset_postgres_schema(container: PostgresContainer) -> None:
     """Drop and recreate the public schema so the next PostgresDatabaseManager
     construction runs migrations against a genuinely blank database, matching
     the fresh-file guarantee duckdb/sqlite get from per-test `tmp_path`.
@@ -80,34 +91,35 @@ def _reset_postgres_schema(container: Any) -> None:
         pytest.param("postgres", marks=pytest.mark.integration),
     ]
 )
-def db(request: pytest.FixtureRequest, tmp_path: Any) -> Iterator[DatabaseManager]:
+def db(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[DatabaseManager]:
     """A freshly-migrated DatabaseManager for the parametrized backend."""
     backend = request.param
     cls: type[DatabaseManager]
     instance: DatabaseManager
 
-    if backend == "duckdb":
-        cls = DuckDBDatabaseManager
-        cls._instance = None
-        instance = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-    elif backend == "sqlite":
-        cls = SqliteDatabaseManager
-        cls._instance = None
-        instance = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
-    else:
-        container = request.getfixturevalue("postgres_container")
-        _reset_postgres_schema(container)
-        cls = PostgresDatabaseManager
-        cls._instance = None
-        instance = PostgresDatabaseManager(
-            host=container.get_container_host_ip(),
-            port=int(container.get_exposed_port(5432)),
-            dbname=container.dbname,
-            user=container.username,
-            password=container.password,
-        )
+    with patch("src.zulipchat_mcp.utils.database._db_manager", None):
+        if backend == "duckdb":
+            cls = DuckDBDatabaseManager
+            cls._instance = None
+            instance = DuckDBDatabaseManager(str(tmp_path / "test.db"))
+        elif backend == "sqlite":
+            cls = SqliteDatabaseManager
+            cls._instance = None
+            instance = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
+        else:
+            container = request.getfixturevalue("postgres_container")
+            _reset_postgres_schema(container)
+            cls = PostgresDatabaseManager
+            cls._instance = None
+            instance = PostgresDatabaseManager(
+                host=container.get_container_host_ip(),
+                port=int(container.get_exposed_port(5432)),
+                dbname=container.dbname,
+                user=container.username,
+                password=container.password,
+            )
 
-    yield instance
+        yield instance
 
-    instance.close()
-    cls._instance = None
+        instance.close()
+        cls._instance = None

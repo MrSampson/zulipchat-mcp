@@ -14,14 +14,42 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from alembic.script import ScriptDirectory
+from sqlalchemy.exc import DataError, ProgrammingError
 
 from src.zulipchat_mcp.utils.database import DatabaseManager, SqliteDatabaseManager
+from src.zulipchat_mcp.utils.migrations import _MIGRATIONS_DIR
+from src.zulipchat_mcp.utils.schema import metadata
+
+
+def _skip_if_sqlite(db: DatabaseManager, reason: str) -> None:
+    """sqlite3's loose type affinity and driver-level typing make a few
+    behaviors genuinely backend-specific rather than universal - verified
+    empirically against all three backends, not assumed.
+    """
+    if isinstance(db, SqliteDatabaseManager):
+        pytest.skip(reason)
 
 
 class TestDatabaseManagerAcrossBackends:
     def test_init_runs_migrations_to_head(self, db: DatabaseManager) -> None:
+        """Checks the actual head revision, not just that some row exists -
+        a backend stuck on an older revision (e.g. a stamped-but-not-upgraded
+        legacy database) must fail this, not pass because *a* row is present.
+        """
+        head = ScriptDirectory(str(_MIGRATIONS_DIR)).get_current_head()
+
         assert db._initialized is True
-        assert db.query_one("SELECT version_num FROM alembic_version") is not None
+        assert db.query_one("SELECT version_num FROM alembic_version") == (head,)
+
+    def test_migrations_create_every_schema_table(self, db: DatabaseManager) -> None:
+        """Proves the migrations actually ran DDL, not just that
+        alembic_version reports the head - a Postgres run_postgres_migrations()
+        that built a correct-looking config but silently no-op'd would still
+        pass the test above.
+        """
+        for table_name in metadata.tables:
+            assert db.query_one(f"SELECT COUNT(*) FROM {table_name}") == (0,)
 
     def test_execute_creates_row(self, db: DatabaseManager) -> None:
         db.execute("CREATE TABLE t (x INTEGER)")
@@ -104,10 +132,9 @@ class TestDatabaseManagerAcrossBackends:
         indirectly: it stores whatever _normalize_params() produces, and
         callers that round-trip the value get back exactly what was stored.
         """
-        if isinstance(db, SqliteDatabaseManager):
-            pytest.skip(
-                "sqlite3 returns TIMESTAMP columns as raw strings, not datetime"
-            )
+        _skip_if_sqlite(
+            db, "sqlite3 returns TIMESTAMP columns as raw strings, not datetime"
+        )
 
         db.execute("CREATE TABLE t (ts TIMESTAMP)")
         aware = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -117,6 +144,48 @@ class TestDatabaseManagerAcrossBackends:
         stored = db.query_one("SELECT ts FROM t")[0]
         assert stored.tzinfo is None
         assert stored == aware.replace(tzinfo=None)
+
+    def test_execute_propagates_error_and_leaves_db_usable(
+        self, db: DatabaseManager
+    ) -> None:
+        """A failing statement raises, and the manager is still usable
+        afterward. duckdb and postgres both raise ProgrammingError for a
+        missing table; sqlite3 raises OperationalError instead (verified
+        empirically), so this only checks the two that agree.
+        """
+        _skip_if_sqlite(
+            db,
+            "sqlite3 raises OperationalError for a missing table, not"
+            " ProgrammingError",
+        )
+
+        with pytest.raises(ProgrammingError):
+            db.execute("INSERT INTO nonexistent_table VALUES (1)")
+
+        db.execute("CREATE TABLE t (x INTEGER)")
+        assert db.query("SELECT x FROM t") == []
+
+    def test_executemany_rolls_back_all_on_partial_failure(
+        self, db: DatabaseManager
+    ) -> None:
+        """A failure partway through executemany() rolls back the whole
+        transaction - the first (successful) insert must not persist
+        either. duckdb and postgres both reject a non-integer string with
+        DataError; sqlite3's loose type affinity stores it without error
+        (verified empirically), so this only checks the two that agree.
+        """
+        _skip_if_sqlite(
+            db,
+            "sqlite3's loose type affinity accepts a string into an"
+            " INTEGER column instead of raising DataError",
+        )
+
+        db.execute("CREATE TABLE t (x INTEGER)")
+
+        with pytest.raises(DataError):
+            db.executemany("INSERT INTO t VALUES (?)", [(1,), ("not-an-int",)])
+
+        assert db.query("SELECT x FROM t") == []
 
     def test_close_disposes_engine_without_error(self, db: DatabaseManager) -> None:
         """close() disposes the engine, but the manager stays usable

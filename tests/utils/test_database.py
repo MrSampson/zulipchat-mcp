@@ -12,7 +12,7 @@ import duckdb
 import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import DataError, OperationalError, ProgrammingError
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool, QueuePool
 
 from src.zulipchat_mcp.utils.database import (
@@ -257,18 +257,6 @@ class TestDatabaseManager:
             holder.terminate()
             holder.wait()
 
-    def test_execute_propagates_error_and_leaves_db_usable(self, tmp_path):
-        """A failing statement raises, and the connection is still released
-        cleanly - later calls against the same DuckDBDatabaseManager still work.
-        """
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-
-        with pytest.raises(ProgrammingError):
-            db.execute("INSERT INTO nonexistent_table VALUES (1)")
-
-        db.execute("CREATE TABLE t (x INTEGER)")
-        assert db.query("SELECT x FROM t") == []
-
     def test_execute_retries_on_lock_then_succeeds(self, tmp_path):
         """execute() retries when the engine reports lock contention."""
         db = DuckDBDatabaseManager(
@@ -347,18 +335,6 @@ class TestDatabaseManager:
             db.query("SELECT *")
 
         assert mock_engine.connect.call_count == 1
-
-    def test_executemany_rolls_back_all_on_partial_failure(self, tmp_path):
-        """A failure partway through executemany() rolls back the whole
-        transaction - the first (successful) insert must not persist either.
-        """
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (x INTEGER)")
-
-        with pytest.raises(DataError):
-            db.executemany("INSERT INTO t VALUES (?)", [(1,), ("not-an-int",)])
-
-        assert db.query("SELECT x FROM t") == []
 
     def test_query_retries_on_lock_then_succeeds(self, tmp_path):
         """query() retries when the engine reports lock contention."""
