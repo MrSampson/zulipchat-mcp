@@ -187,6 +187,12 @@ class ConfigManager:
         Raises ValueError on an unrecognized DATABASE_BACKEND rather than
         silently falling back to duckdb - a typo here should fail loudly at
         startup, not switch someone's data to a different empty backend.
+
+        Likewise raises when DATABASE_BACKEND=postgres is missing any of the
+        connection fields that have no sensible default, rather than letting a
+        literal `None` reach the connection URL and fail far from its cause.
+        POSTGRES_PASSWORD is deliberately not required - trust/peer/IAM auth
+        deployments legitimately have no password.
         """
         backend_raw = self._env("DATABASE_BACKEND") or DatabaseBackend.DUCKDB.value  # type: ignore
         try:
@@ -198,13 +204,33 @@ class ConfigManager:
             ) from exc
 
         port_raw = self._env("POSTGRES_PORT")
+        host = self._env("POSTGRES_HOST")
+        dbname = self._env("POSTGRES_DB")
+        user = self._env("POSTGRES_USER")
+
+        if backend is DatabaseBackend.POSTGRES:
+            missing = [
+                name
+                for name, value in (
+                    ("POSTGRES_HOST", host),
+                    ("POSTGRES_DB", dbname),
+                    ("POSTGRES_USER", user),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ValueError(
+                    "DATABASE_BACKEND=postgres requires "
+                    f"{', '.join(missing)} to be set."
+                )
+
         return DatabaseConfig(
             backend=backend,
             path=self._env("ZULIPCHAT_DB_PATH") or _default_db_path(backend),
-            postgres_host=self._env("POSTGRES_HOST"),
+            postgres_host=host,
             postgres_port=int(port_raw) if port_raw else 5432,
-            postgres_db=self._env("POSTGRES_DB"),
-            postgres_user=self._env("POSTGRES_USER"),
+            postgres_db=dbname,
+            postgres_user=user,
             postgres_password=self._env("POSTGRES_PASSWORD"),
         )
 

@@ -7,7 +7,9 @@ MCP client configuration for major clients.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -367,7 +369,10 @@ def generate_claude_code_command(
         parts.append(f"-e ZULIP_BOT_CONFIG_FILE={bot_config['path']}")
 
     for key, value in (env or {}).items():
-        parts.append(f"-e {key}={value}")
+        # shlex.quote: this string is printed for the user to copy/paste into
+        # a shell, and a POSTGRES_PASSWORD containing a space, $, " or '
+        # would otherwise break the command or shell-expand unexpectedly.
+        parts.append(f"-e {key}={shlex.quote(value)}")
 
     cmd_tail = "-- uvx zulipchat-mcp"
     if extended_tools:
@@ -438,15 +443,23 @@ def _render_opencode_config(base: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+def _toml_escape(value: str) -> str:
+    """Escape a value for a TOML basic string. Without this a value
+    containing `"` or `\\` (a Postgres password, say) produces invalid TOML
+    the user then pastes into their Codex config.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _render_codex_toml(base: dict[str, Any]) -> str:
     """Render the Codex config.toml `[mcp_servers.zulipchat]` block."""
-    args = ", ".join(f'"{arg}"' for arg in base["args"])
-    toml_block = (
-        f"\n[mcp_servers.zulipchat]\ncommand = \"{base['command']}\"\nargs = [{args}]\n"
-    )
+    args = ", ".join(f'"{_toml_escape(str(arg))}"' for arg in base["args"])
+    command = _toml_escape(str(base["command"]))
+    toml_block = f'\n[mcp_servers.zulipchat]\ncommand = "{command}"\nargs = [{args}]\n'
     if base.get("env"):
         env_pairs = ", ".join(
-            f'{key} = "{value}"' for key, value in base["env"].items()
+            f'{key} = "{_toml_escape(str(value))}"'
+            for key, value in base["env"].items()
         )
         toml_block += f"env = {{ {env_pairs} }}\n"
     return toml_block
@@ -488,7 +501,9 @@ def prompt_database_backend() -> dict[str, str]:
         port = prompt("Postgres port", default="5432")
         dbname = prompt("Postgres database name")
         user = prompt("Postgres user")
-        password = prompt("Postgres password")
+        # getpass, not prompt(): prompt() wraps bare input(), which echoes
+        # the password to the terminal (and into scrollback/screen-shares).
+        password = getpass.getpass("Postgres password: ")
         return {
             "DATABASE_BACKEND": "postgres",
             "POSTGRES_HOST": host,

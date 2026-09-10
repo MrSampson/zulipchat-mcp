@@ -1,6 +1,7 @@
 """Tests for setup_wizard.py."""
 
 import json
+import shlex
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -317,8 +318,11 @@ class TestPromptDatabaseBackend:
         assert env == {"DATABASE_BACKEND": "sqlite"}
 
     def test_postgres_prompts_for_connection_fields(self, monkeypatch):
-        answers = iter(["3", "db.internal", "6543", "zulipchat", "mcp", "s3cret"])
+        answers = iter(["3", "db.internal", "6543", "zulipchat", "mcp"])
         monkeypatch.setattr("builtins.input", lambda _: next(answers))
+        monkeypatch.setattr(
+            "src.zulipchat_mcp.setup_wizard.getpass.getpass", lambda _: "s3cret"
+        )
 
         env = prompt_database_backend()
 
@@ -391,6 +395,25 @@ class TestGenerateClaudeCodeCommandEnv:
         command = generate_claude_code_command(user_config)
 
         assert "DATABASE_BACKEND" not in command
+
+    def test_shell_quotes_env_values_with_spaces_and_dollars(self):
+        """This string is printed for the user to paste into a shell - an
+        unquoted password with a space or `$` breaks the command or
+        shell-expands into something else.
+        """
+        user_config = {"path": "/home/u/.zuliprc"}
+
+        command = generate_claude_code_command(
+            user_config,
+            env={"POSTGRES_PASSWORD": "pa ss$HOME'\"x"},
+        )
+
+        assert "-e POSTGRES_PASSWORD=pa ss$HOME" not in command
+        quoted = shlex.quote("pa ss$HOME'\"x")
+        assert f"-e POSTGRES_PASSWORD={quoted}" in command
+        # The pasted command must round-trip back to the original value.
+        flags = shlex.split(command.replace("\\\n", " "))
+        assert "POSTGRES_PASSWORD=pa ss$HOME'\"x" in flags
 
 
 class TestRenderVscodeConfigEnv:
@@ -472,6 +495,28 @@ class TestRenderCodexTomlEnv:
         assert 'env = { DATABASE_BACKEND = "postgres", POSTGRES_HOST = "db" }' in (
             toml_block
         )
+
+    def test_escapes_quotes_and_backslashes_in_env_values(self):
+        """An unescaped `"` or `\\` in a value produces invalid TOML that the
+        user then pastes into their Codex config.
+        """
+        base = {
+            "command": "uv",
+            "args": ["zulipchat-mcp"],
+            "env": {"POSTGRES_PASSWORD": 'pa"ss\\word'},
+        }
+
+        toml_block = _render_codex_toml(base)
+
+        assert 'POSTGRES_PASSWORD = "pa\\"ss\\\\word"' in toml_block
+        assert 'POSTGRES_PASSWORD = "pa"ss' not in toml_block
+
+    def test_escapes_quotes_in_args(self):
+        base = {"command": "uv", "args": ['a"b'], "env": {}}
+
+        toml_block = _render_codex_toml(base)
+
+        assert 'args = ["a\\"b"]' in toml_block
 
     def test_omits_env_when_not_provided(self):
         base = {"command": "uv", "args": ["zulipchat-mcp"]}

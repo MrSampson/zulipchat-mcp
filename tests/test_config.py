@@ -64,12 +64,49 @@ def test_database_config_rejects_unknown_backend(
         ConfigManager()
 
 
+def _set_required_postgres_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_BACKEND", "postgres")
+    monkeypatch.setenv("POSTGRES_HOST", "db.internal")
+    monkeypatch.setenv("POSTGRES_DB", "zulipchat")
+    monkeypatch.setenv("POSTGRES_USER", "mcp")
+
+
 def test_database_config_postgres_port_defaults_when_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DATABASE_BACKEND", "postgres")
+    _set_required_postgres_env(monkeypatch)
     monkeypatch.delenv("POSTGRES_PORT", raising=False)
 
     config = ConfigManager()
 
     assert config.config.database.postgres_port == 5432
+
+
+@pytest.mark.parametrize(
+    "missing_var", ["POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER"]
+)
+def test_database_config_postgres_requires_connection_fields(
+    monkeypatch: pytest.MonkeyPatch, missing_var: str
+) -> None:
+    """Without this, postgres_host=None flowed all the way into the
+    connection URL as a literal `None` hostname - a failure far from
+    its cause.
+    """
+    _set_required_postgres_env(monkeypatch)
+    monkeypatch.delenv(missing_var, raising=False)
+
+    with pytest.raises(ValueError, match=missing_var):
+        ConfigManager()
+
+
+def test_database_config_postgres_allows_missing_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Trust/peer/IAM auth deployments legitimately have no password."""
+    _set_required_postgres_env(monkeypatch)
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+
+    config = ConfigManager()
+
+    assert config.config.database.postgres_password is None
+    assert config.config.database.postgres_host == "db.internal"
