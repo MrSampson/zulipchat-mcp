@@ -413,20 +413,43 @@ def write_config_to_file(
 
 def _render_vscode_config(base: dict[str, Any]) -> dict[str, Any]:
     """Render VS Code/Copilot config shape."""
-    return {
+    config: dict[str, Any] = {
         "type": "stdio",
         "command": base["command"],
         "args": base["args"],
     }
+    if base.get("env"):
+        config["env"] = base["env"]
+    return config
 
 
 def _render_opencode_config(base: dict[str, Any]) -> dict[str, Any]:
     """Render OpenCode config shape."""
-    return {
+    config: dict[str, Any] = {
         "type": "local",
         "enabled": True,
         "command": [base["command"], *base["args"]],
     }
+    if base.get("env"):
+        # OpenCode's exact env field name is not verified against upstream
+        # docs from within this repo; "env" matches the convention used by
+        # every other renderer in this file.
+        config["env"] = base["env"]
+    return config
+
+
+def _render_codex_toml(base: dict[str, Any]) -> str:
+    """Render the Codex config.toml `[mcp_servers.zulipchat]` block."""
+    args = ", ".join(f'"{arg}"' for arg in base["args"])
+    toml_block = (
+        f"\n[mcp_servers.zulipchat]\ncommand = \"{base['command']}\"\nargs = [{args}]\n"
+    )
+    if base.get("env"):
+        env_pairs = ", ".join(
+            f'{key} = "{value}"' for key, value in base["env"].items()
+        )
+        toml_block += f"env = {{ {env_pairs} }}\n"
+    return toml_block
 
 
 def _print_config_block(title: str, payload: dict[str, Any]) -> None:
@@ -582,10 +605,7 @@ def main(argv: list[str] | None = None) -> None:
     elif client_choice == "4":
         config_path = get_mcp_client_config_path("codex")
         print(f"\n{BOLD}Codex configuration (config.toml){RESET}")
-        args = ", ".join(f'"{arg}"' for arg in mcp_config["args"])
-        print(
-            f"\n[mcp_servers.zulipchat]\ncommand = \"{mcp_config['command']}\"\nargs = [{args}]\n"
-        )
+        print(_render_codex_toml(mcp_config))
         if config_path:
             print(f"Suggested path: {config_path}")
 

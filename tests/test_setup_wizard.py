@@ -8,6 +8,9 @@ import pytest
 
 from src.zulipchat_mcp import __version__
 from src.zulipchat_mcp.setup_wizard import (
+    _render_codex_toml,
+    _render_opencode_config,
+    _render_vscode_config,
     generate_claude_code_command,
     generate_mcp_config,
     get_mcp_client_config_path,
@@ -388,3 +391,98 @@ class TestGenerateClaudeCodeCommandEnv:
         command = generate_claude_code_command(user_config)
 
         assert "DATABASE_BACKEND" not in command
+
+
+class TestRenderVscodeConfigEnv:
+    """Tests for env threading through _render_vscode_config."""
+
+    def test_includes_env_when_provided(self):
+        base = {
+            "command": "uv",
+            "args": ["zulipchat-mcp"],
+            "env": {"DATABASE_BACKEND": "postgres", "POSTGRES_HOST": "db"},
+        }
+
+        config = _render_vscode_config(base)
+
+        assert config["env"] == {
+            "DATABASE_BACKEND": "postgres",
+            "POSTGRES_HOST": "db",
+        }
+
+    def test_omits_env_when_not_provided(self):
+        base = {"command": "uv", "args": ["zulipchat-mcp"]}
+
+        config = _render_vscode_config(base)
+
+        assert "env" not in config
+
+    def test_omits_env_when_empty(self):
+        base = {"command": "uv", "args": ["zulipchat-mcp"], "env": {}}
+
+        config = _render_vscode_config(base)
+
+        assert "env" not in config
+
+
+class TestRenderOpencodeConfigEnv:
+    """Tests for env threading through _render_opencode_config."""
+
+    def test_includes_env_when_provided(self):
+        base = {
+            "command": "uv",
+            "args": ["zulipchat-mcp"],
+            "env": {"DATABASE_BACKEND": "postgres", "POSTGRES_HOST": "db"},
+        }
+
+        config = _render_opencode_config(base)
+
+        assert config["env"] == {
+            "DATABASE_BACKEND": "postgres",
+            "POSTGRES_HOST": "db",
+        }
+
+    def test_omits_env_when_not_provided(self):
+        base = {"command": "uv", "args": ["zulipchat-mcp"]}
+
+        config = _render_opencode_config(base)
+
+        assert "env" not in config
+
+    def test_omits_env_when_empty(self):
+        base = {"command": "uv", "args": ["zulipchat-mcp"], "env": {}}
+
+        config = _render_opencode_config(base)
+
+        assert "env" not in config
+
+
+class TestRenderCodexTomlEnv:
+    """Tests for env threading through _render_codex_toml."""
+
+    def test_includes_env_when_provided(self):
+        base = {
+            "command": "uv",
+            "args": ["zulipchat-mcp"],
+            "env": {"DATABASE_BACKEND": "postgres", "POSTGRES_HOST": "db"},
+        }
+
+        toml_block = _render_codex_toml(base)
+
+        assert 'env = { DATABASE_BACKEND = "postgres", POSTGRES_HOST = "db" }' in (
+            toml_block
+        )
+
+    def test_omits_env_when_not_provided(self):
+        base = {"command": "uv", "args": ["zulipchat-mcp"]}
+
+        toml_block = _render_codex_toml(base)
+
+        assert "env" not in toml_block
+
+    def test_omits_env_when_empty(self):
+        base = {"command": "uv", "args": ["zulipchat-mcp"], "env": {}}
+
+        toml_block = _render_codex_toml(base)
+
+        assert "env" not in toml_block
