@@ -11,6 +11,9 @@ All notable changes to ZulipChat MCP are documented in this file.
 ### Breaking Changes & Migration
 - **`duckdb` and `duckdb-engine` are no longer hard dependencies.** They moved into an optional `[duckdb]` extra so installs that use `sqlite` or `postgres` don't pull in an unused database engine. Existing users on the default backend must add the extra when upgrading: `pip install zulipchat-mcp[duckdb]` (or `uv add zulipchat-mcp[duckdb]`, or `uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp`). Without it the server logs an actionable startup warning naming the missing extra and the install command, then continues running with agent/database-backed features disabled — it never silently falls back to a different backend.
 
+### Maintenance
+- The DatabaseManager behavioral test suite (execute/query/upsert/migrations) is now parametrized across all three backends and runs for real against a Postgres instance started on demand via `testcontainers`, instead of only unit/mock coverage for `postgres`. CI runs it in a dedicated `test-integration` job. Resolves #5.
+
 ## [0.7.3-beta.1] (2026-08-09)
 
 ### Fixed

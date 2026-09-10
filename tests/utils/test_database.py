@@ -64,7 +64,11 @@ def _hold_lock(db_path: str) -> subprocess.Popen:
 
 
 class TestDatabaseManager:
-    """Tests for DuckDBDatabaseManager with short-lived connections."""
+    """Tests for DuckDBDatabaseManager behavior specific to it: file-lock
+    retry/stale-lock handling and short-lived-connection details. Shared
+    backend-agnostic behavior (execute/query/upsert/etc.) lives in
+    test_database_backends.py, parametrized across every backend.
+    """
 
     @pytest.fixture(autouse=True)
     def reset_singleton(self):
@@ -253,15 +257,6 @@ class TestDatabaseManager:
             holder.terminate()
             holder.wait()
 
-    def test_execute_creates_row(self, tmp_path):
-        """execute() runs a real write and commits it."""
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (x INTEGER)")
-
-        db.execute("INSERT INTO t VALUES (?)", [1])
-
-        assert db.query("SELECT x FROM t") == [(1,)]
-
     def test_execute_propagates_error_and_leaves_db_usable(self, tmp_path):
         """A failing statement raises, and the connection is still released
         cleanly - later calls against the same DuckDBDatabaseManager still work.
@@ -353,29 +348,6 @@ class TestDatabaseManager:
 
         assert mock_engine.connect.call_count == 1
 
-    def test_executemany_inserts_all_rows(self, tmp_path):
-        """executemany() writes every row in a single transaction."""
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (x INTEGER)")
-
-        db.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
-
-        assert db.query("SELECT x FROM t ORDER BY x") == [(1,), (2,)]
-
-    def test_executemany_accepts_list_shaped_rows(self, tmp_path):
-        """SQLAlchemy's parameter distiller rejects a bare list per row
-        (only tuples/dicts), unlike the pre-refactor raw duckdb.connect()
-        which accepted either - each row must be coerced to a tuple before
-        reaching exec_driver_sql. execute()/query() already accept
-        list-shaped single-row params; this pins the same for executemany().
-        """
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (x INTEGER)")
-
-        db.executemany("INSERT INTO t VALUES (?)", [[1], [2]])
-
-        assert db.query("SELECT x FROM t ORDER BY x") == [(1,), (2,)]
-
     def test_executemany_rolls_back_all_on_partial_failure(self, tmp_path):
         """A failure partway through executemany() rolls back the whole
         transaction - the first (successful) insert must not persist either.
@@ -387,19 +359,6 @@ class TestDatabaseManager:
             db.executemany("INSERT INTO t VALUES (?)", [(1,), ("not-an-int",)])
 
         assert db.query("SELECT x FROM t") == []
-
-    def test_query_returns_rows_as_tuples(self, tmp_path):
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (id INTEGER, name VARCHAR)")
-        db.execute("INSERT INTO t VALUES (?, ?)", [1, "a"])
-
-        assert db.query("SELECT id, name FROM t") == [(1, "a")]
-
-    def test_query_returns_empty_list_when_no_rows(self, tmp_path):
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (id INTEGER)")
-
-        assert db.query("SELECT id FROM t") == []
 
     def test_query_retries_on_lock_then_succeeds(self, tmp_path):
         """query() retries when the engine reports lock contention."""
@@ -426,60 +385,6 @@ class TestDatabaseManager:
 
         assert result == [(1,)]
         assert mock_engine.connect.call_count == 3
-
-    def test_query_one_returns_single_tuple(self, tmp_path):
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (id INTEGER)")
-        db.execute("INSERT INTO t VALUES (?)", [1])
-
-        assert db.query_one("SELECT id FROM t") == (1,)
-
-    def test_query_one_returns_none_when_no_rows(self, tmp_path):
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (id INTEGER)")
-
-        assert db.query_one("SELECT id FROM t") is None
-
-    def test_query_as_dicts_returns_list_of_dicts(self, tmp_path):
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (id INTEGER, name VARCHAR)")
-        db.executemany("INSERT INTO t VALUES (?, ?)", [(1, "a"), (2, "b")])
-
-        result = db.query_as_dicts("SELECT id, name FROM t ORDER BY id")
-
-        assert result == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
-
-    def test_query_as_dicts_returns_empty_list_when_no_rows(self, tmp_path):
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (id INTEGER)")
-
-        assert db.query_as_dicts("SELECT id FROM t") == []
-
-    def test_query_one_as_dict_returns_dict(self, tmp_path):
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (id INTEGER, name VARCHAR)")
-        db.execute("INSERT INTO t VALUES (?, ?)", [1, "a"])
-
-        assert db.query_one_as_dict("SELECT id, name FROM t") == {"id": 1, "name": "a"}
-
-    def test_query_one_as_dict_returns_none_when_no_rows(self, tmp_path):
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (id INTEGER)")
-
-        assert db.query_one_as_dict("SELECT id FROM t") is None
-
-    def test_close_disposes_engine_without_error(self, tmp_path):
-        """close() disposes the engine. Under NullPool there's nothing
-        pooled to discard, but the engine stays usable afterward - dispose()
-        only clears idle pooled connections, it doesn't tear down the engine.
-        """
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-
-        db.close()
-
-        assert db._initialized is True
-        db.execute("CREATE TABLE t (x INTEGER)")
-        assert db.query("SELECT x FROM t") == []
 
     def test_clear_stale_lock_removes_wal_when_holder_is_dead(
         self, tmp_path, monkeypatch
@@ -558,19 +463,6 @@ class TestDatabaseManager:
         with pytest.raises(RuntimeError, match="not initialized"):
             get_database()
 
-    def test_execute_strips_tzinfo_from_aware_datetime_params(self, tmp_path):
-        from datetime import datetime, timezone
-
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE t (ts TIMESTAMP)")
-        aware = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-
-        db.execute("INSERT INTO t VALUES (?)", [aware])
-
-        stored = db.query_one("SELECT ts FROM t")[0]
-        assert stored.tzinfo is None
-        assert stored == aware.replace(tzinfo=None)
-
     def test_make_engine_raises_actionable_error_when_duckdb_engine_missing(
         self, tmp_path, monkeypatch
     ):
@@ -581,25 +473,12 @@ class TestDatabaseManager:
         with pytest.raises(RuntimeError, match=r"\[duckdb\]"):
             DuckDBDatabaseManager(str(tmp_path / "test.db"))
 
-    def test_upsert_replaces_row_with_same_conflict_column_instead_of_duplicating(
-        self, tmp_path
-    ):
-        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
-        db.execute("CREATE TABLE upsert_t (id INTEGER PRIMARY KEY, name TEXT)")
-
-        db.upsert(
-            "upsert_t", ["id", "name"], (1, "original-name"), conflict_column="id"
-        )
-        db.upsert("upsert_t", ["id", "name"], (1, "updated-name"), conflict_column="id")
-
-        rows = db.query("SELECT id, name FROM upsert_t")
-        assert rows == [(1, "updated-name")]
-
 
 class TestSqliteDatabaseManager:
-    """Tests for SqliteDatabaseManager - mirrors TestDuckDBDatabaseManager's
-    backend-agnostic behavior. Lock-retry and stale-lock-PID tests stay
-    DuckDB-only (sqlite's "database is locked" error carries no PID).
+    """Tests for SqliteDatabaseManager behavior that's specific to it, or
+    that pins the base class's default for a hook DuckDB overrides. Shared
+    backend-agnostic behavior (execute/query/upsert/etc.) lives in
+    test_database_backends.py, parametrized across every backend.
     """
 
     @pytest.fixture(autouse=True)
@@ -622,42 +501,6 @@ class TestSqliteDatabaseManager:
         finally:
             conn.close()
         assert row == ("0001",)
-
-    def test_execute_creates_row(self, tmp_path):
-        db = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
-        db.execute("CREATE TABLE t (x INTEGER)")
-
-        db.execute("INSERT INTO t VALUES (?)", [1])
-
-        assert db.query("SELECT x FROM t") == [(1,)]
-
-    def test_executemany_inserts_all_rows(self, tmp_path):
-        db = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
-        db.execute("CREATE TABLE t (x INTEGER)")
-
-        db.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
-
-        assert db.query("SELECT x FROM t ORDER BY x") == [(1,), (2,)]
-
-    def test_query_as_dicts_returns_list_of_dicts(self, tmp_path):
-        db = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
-        db.execute("CREATE TABLE t (id INTEGER, name VARCHAR)")
-        db.executemany("INSERT INTO t VALUES (?, ?)", [(1, "a"), (2, "b")])
-
-        result = db.query_as_dicts("SELECT id, name FROM t ORDER BY id")
-
-        assert result == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
-
-    def test_upsert_replaces_row_with_same_conflict_column_instead_of_duplicating(
-        self, tmp_path
-    ):
-        db = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
-        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name VARCHAR)")
-
-        db.upsert("t", ["id", "name"], [1, "original-name"], "id")
-        db.upsert("t", ["id", "name"], [1, "updated-name"], "id")
-
-        assert db.query("SELECT id, name FROM t") == [(1, "updated-name")]
 
     def test_try_clear_stale_lock_uses_base_class_default_of_false(self, tmp_path):
         """SqliteDatabaseManager doesn't override _try_clear_stale_lock (no
