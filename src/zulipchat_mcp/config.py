@@ -20,6 +20,7 @@ except ImportError:
 
         pass
 
+
 if TYPE_CHECKING:
     from .core.client import ZulipClientWrapper
 

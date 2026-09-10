@@ -55,7 +55,9 @@ def test_database_config_reads_postgres_fields(monkeypatch: pytest.MonkeyPatch) 
     assert db.postgres_password == "secret"
 
 
-def test_database_config_rejects_unknown_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_database_config_rejects_unknown_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("DATABASE_BACKEND", "mongodb")
 
     with pytest.raises(ValueError, match="DATABASE_BACKEND"):
