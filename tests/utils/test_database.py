@@ -569,3 +569,17 @@ class TestDatabaseManager:
 
         with pytest.raises(RuntimeError, match=r"\[duckdb\]"):
             DuckDBDatabaseManager(str(tmp_path / "test.db"))
+
+    def test_upsert_replaces_row_with_same_conflict_column_instead_of_duplicating(
+        self, tmp_path
+    ):
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE upsert_t (id INTEGER PRIMARY KEY, name TEXT)")
+
+        db.upsert(
+            "upsert_t", ["id", "name"], (1, "original-name"), conflict_column="id"
+        )
+        db.upsert("upsert_t", ["id", "name"], (1, "updated-name"), conflict_column="id")
+
+        rows = db.query("SELECT id, name FROM upsert_t")
+        assert rows == [(1, "updated-name")]
