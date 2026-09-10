@@ -13,7 +13,7 @@ from sqlalchemy.pool import NullPool
 
 from src.zulipchat_mcp.utils.database import (
     DatabaseLockedError,
-    DatabaseManager,
+    DuckDBDatabaseManager,
     get_database,
     init_database,
 )
@@ -58,16 +58,16 @@ def _hold_lock(db_path: str) -> subprocess.Popen:
 
 
 class TestDatabaseManager:
-    """Tests for DatabaseManager with short-lived connections."""
+    """Tests for DuckDBDatabaseManager with short-lived connections."""
 
     @pytest.fixture(autouse=True)
     def reset_singleton(self):
         """Reset singleton before and after each test."""
-        DatabaseManager._instance = None
+        DuckDBDatabaseManager._instance = None
         # Also reset the global variable in the module
         with patch("src.zulipchat_mcp.utils.database._db_manager", None):
             yield
-        DatabaseManager._instance = None
+        DuckDBDatabaseManager._instance = None
 
     def test_init_success(self, tmp_path):
         """Test successful initialization runs Alembic migrations against a real
@@ -75,7 +75,7 @@ class TestDatabaseManager:
         genuinely short-lived (opened/closed per call) rather than pooled.
         """
         db_path = str(tmp_path / "test.db")
-        db = DatabaseManager(db_path)
+        db = DuckDBDatabaseManager(db_path)
 
         assert db._initialized is True
         assert db.db_path == db_path
@@ -98,12 +98,14 @@ class TestDatabaseManager:
         # short-circuit, decoupling this test from real PID liveness.
         with (
             patch(
-                "src.zulipchat_mcp.utils.database.run_migrations",
+                "src.zulipchat_mcp.utils.migrations.run_migrations",
                 side_effect=[_lock_error(), _lock_error(), None],
             ) as mock_run_migrations,
-            patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False),
+            patch.object(
+                DuckDBDatabaseManager, "_try_clear_stale_lock", return_value=False
+            ),
         ):
-            db = DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
+            db = DuckDBDatabaseManager(db_path, max_retries=3, retry_delay=0.01)
 
         assert db._initialized is True
         assert mock_run_migrations.call_count == 3
@@ -114,13 +116,15 @@ class TestDatabaseManager:
 
         with (
             patch(
-                "src.zulipchat_mcp.utils.database.run_migrations",
+                "src.zulipchat_mcp.utils.migrations.run_migrations",
                 side_effect=_lock_error(),
             ) as mock_run_migrations,
-            patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False),
+            patch.object(
+                DuckDBDatabaseManager, "_try_clear_stale_lock", return_value=False
+            ),
         ):
             with pytest.raises(DatabaseLockedError, match="Database is locked"):
-                DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
+                DuckDBDatabaseManager(db_path, max_retries=3, retry_delay=0.01)
 
         assert mock_run_migrations.call_count == 3
 
@@ -133,14 +137,14 @@ class TestDatabaseManager:
 
         with (
             patch(
-                "src.zulipchat_mcp.utils.database.run_migrations",
+                "src.zulipchat_mcp.utils.migrations.run_migrations",
                 side_effect=[_lock_error(), None],
             ) as mock_run_migrations,
             patch.object(
-                DatabaseManager, "_try_clear_stale_lock", side_effect=[True]
+                DuckDBDatabaseManager, "_try_clear_stale_lock", side_effect=[True]
             ) as mock_clear_stale_lock,
         ):
-            db = DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
+            db = DuckDBDatabaseManager(db_path, max_retries=3, retry_delay=0.01)
 
         assert db._initialized is True
         assert mock_run_migrations.call_count == 2
@@ -158,13 +162,15 @@ class TestDatabaseManager:
 
         with (
             patch(
-                "src.zulipchat_mcp.utils.database.run_migrations",
+                "src.zulipchat_mcp.utils.migrations.run_migrations",
                 side_effect=_lock_error(),
             ) as mock_run_migrations,
-            patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=True),
+            patch.object(
+                DuckDBDatabaseManager, "_try_clear_stale_lock", return_value=True
+            ),
         ):
             with pytest.raises(DatabaseLockedError, match="Database is locked"):
-                DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
+                DuckDBDatabaseManager(db_path, max_retries=3, retry_delay=0.01)
 
         assert mock_run_migrations.call_count == 3
 
@@ -177,11 +183,11 @@ class TestDatabaseManager:
         db_path = str(tmp_path / "test.db")
 
         with patch(
-            "src.zulipchat_mcp.utils.database.run_migrations",
+            "src.zulipchat_mcp.utils.migrations.run_migrations",
             side_effect=_non_lock_operational_error(),
         ) as mock_run_migrations:
             with pytest.raises(OperationalError, match="table already exists"):
-                DatabaseManager(db_path, max_retries=3, retry_delay=0.01)
+                DuckDBDatabaseManager(db_path, max_retries=3, retry_delay=0.01)
 
         # Not a lock problem, so it must not have been retried.
         assert mock_run_migrations.call_count == 1
@@ -213,7 +219,7 @@ class TestDatabaseManager:
         try:
             time.sleep(0.3)  # let the holder acquire the lock first
             start = time.monotonic()
-            db = DatabaseManager(db_path, max_retries=10, retry_delay=0.2)
+            db = DuckDBDatabaseManager(db_path, max_retries=10, retry_delay=0.2)
             assert db._initialized is True
             assert time.monotonic() - start > 0.5, "expected to block on the holder"
         finally:
@@ -224,11 +230,11 @@ class TestDatabaseManager:
     def test_execute_retries_through_real_cross_process_lock_contention(self, tmp_path):
         """Same regression as the init test above, but for the shared
         _with_lock_retry path used by execute()/query()/etc. once the
-        DatabaseManager is already up - proves the runtime hot path (not
+        DuckDBDatabaseManager is already up - proves the runtime hot path (not
         just startup) survives genuine cross-process lock contention.
         """
         db_path = str(tmp_path / "contended.db")
-        db = DatabaseManager(db_path, max_retries=10, retry_delay=0.2)
+        db = DuckDBDatabaseManager(db_path, max_retries=10, retry_delay=0.2)
 
         holder = _hold_lock(db_path)
         try:
@@ -243,7 +249,7 @@ class TestDatabaseManager:
 
     def test_execute_creates_row(self, tmp_path):
         """execute() runs a real write and commits it."""
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (x INTEGER)")
 
         db.execute("INSERT INTO t VALUES (?)", [1])
@@ -252,9 +258,9 @@ class TestDatabaseManager:
 
     def test_execute_propagates_error_and_leaves_db_usable(self, tmp_path):
         """A failing statement raises, and the connection is still released
-        cleanly - later calls against the same DatabaseManager still work.
+        cleanly - later calls against the same DuckDBDatabaseManager still work.
         """
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
 
         with pytest.raises(ProgrammingError):
             db.execute("INSERT INTO nonexistent_table VALUES (1)")
@@ -264,7 +270,9 @@ class TestDatabaseManager:
 
     def test_execute_retries_on_lock_then_succeeds(self, tmp_path):
         """execute() retries when the engine reports lock contention."""
-        db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
+        db = DuckDBDatabaseManager(
+            str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01
+        )
 
         success_conn = MagicMock()
         mock_engine = MagicMock()
@@ -275,7 +283,9 @@ class TestDatabaseManager:
         ]
         db._engine = mock_engine
 
-        with patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False):
+        with patch.object(
+            DuckDBDatabaseManager, "_try_clear_stale_lock", return_value=False
+        ):
             db.execute("INSERT INTO t VALUES (?)", [1])
 
         assert mock_engine.begin.call_count == 3
@@ -287,13 +297,17 @@ class TestDatabaseManager:
         self, tmp_path
     ):
         """execute() gives up and raises DatabaseLockedError after max_retries."""
-        db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
+        db = DuckDBDatabaseManager(
+            str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01
+        )
 
         mock_engine = MagicMock()
         mock_engine.begin.side_effect = _lock_error()
         db._engine = mock_engine
 
-        with patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False):
+        with patch.object(
+            DuckDBDatabaseManager, "_try_clear_stale_lock", return_value=False
+        ):
             with pytest.raises(DatabaseLockedError, match="Database is locked"):
                 db.execute("INSERT INTO t VALUES (?)", [1])
 
@@ -305,7 +319,9 @@ class TestDatabaseManager:
         get retried - mirrors test_init_reraises_non_lock_operational_error_
         unmangled, but for the execute() retry loop instead of init's.
         """
-        db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
+        db = DuckDBDatabaseManager(
+            str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01
+        )
 
         mock_engine = MagicMock()
         mock_engine.begin.side_effect = _non_lock_operational_error()
@@ -318,7 +334,9 @@ class TestDatabaseManager:
 
     def test_query_reraises_non_lock_operational_error_unmangled(self, tmp_path):
         """Same invariant as above, for the query() retry loop."""
-        db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
+        db = DuckDBDatabaseManager(
+            str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01
+        )
 
         mock_engine = MagicMock()
         mock_engine.connect.side_effect = _non_lock_operational_error()
@@ -331,7 +349,7 @@ class TestDatabaseManager:
 
     def test_executemany_inserts_all_rows(self, tmp_path):
         """executemany() writes every row in a single transaction."""
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (x INTEGER)")
 
         db.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
@@ -345,7 +363,7 @@ class TestDatabaseManager:
         reaching exec_driver_sql. execute()/query() already accept
         list-shaped single-row params; this pins the same for executemany().
         """
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (x INTEGER)")
 
         db.executemany("INSERT INTO t VALUES (?)", [[1], [2]])
@@ -356,7 +374,7 @@ class TestDatabaseManager:
         """A failure partway through executemany() rolls back the whole
         transaction - the first (successful) insert must not persist either.
         """
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (x INTEGER)")
 
         with pytest.raises(DataError):
@@ -365,21 +383,23 @@ class TestDatabaseManager:
         assert db.query("SELECT x FROM t") == []
 
     def test_query_returns_rows_as_tuples(self, tmp_path):
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (id INTEGER, name VARCHAR)")
         db.execute("INSERT INTO t VALUES (?, ?)", [1, "a"])
 
         assert db.query("SELECT id, name FROM t") == [(1, "a")]
 
     def test_query_returns_empty_list_when_no_rows(self, tmp_path):
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (id INTEGER)")
 
         assert db.query("SELECT id FROM t") == []
 
     def test_query_retries_on_lock_then_succeeds(self, tmp_path):
         """query() retries when the engine reports lock contention."""
-        db = DatabaseManager(str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01)
+        db = DuckDBDatabaseManager(
+            str(tmp_path / "test.db"), max_retries=3, retry_delay=0.01
+        )
 
         cursor = MagicMock()
         cursor.fetchall.return_value = [(1,)]
@@ -393,27 +413,29 @@ class TestDatabaseManager:
         ]
         db._engine = mock_engine
 
-        with patch.object(DatabaseManager, "_try_clear_stale_lock", return_value=False):
+        with patch.object(
+            DuckDBDatabaseManager, "_try_clear_stale_lock", return_value=False
+        ):
             result = db.query("SELECT *")
 
         assert result == [(1,)]
         assert mock_engine.connect.call_count == 3
 
     def test_query_one_returns_single_tuple(self, tmp_path):
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (id INTEGER)")
         db.execute("INSERT INTO t VALUES (?)", [1])
 
         assert db.query_one("SELECT id FROM t") == (1,)
 
     def test_query_one_returns_none_when_no_rows(self, tmp_path):
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (id INTEGER)")
 
         assert db.query_one("SELECT id FROM t") is None
 
     def test_query_as_dicts_returns_list_of_dicts(self, tmp_path):
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (id INTEGER, name VARCHAR)")
         db.executemany("INSERT INTO t VALUES (?, ?)", [(1, "a"), (2, "b")])
 
@@ -422,20 +444,20 @@ class TestDatabaseManager:
         assert result == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
 
     def test_query_as_dicts_returns_empty_list_when_no_rows(self, tmp_path):
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (id INTEGER)")
 
         assert db.query_as_dicts("SELECT id FROM t") == []
 
     def test_query_one_as_dict_returns_dict(self, tmp_path):
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (id INTEGER, name VARCHAR)")
         db.execute("INSERT INTO t VALUES (?, ?)", [1, "a"])
 
         assert db.query_one_as_dict("SELECT id, name FROM t") == {"id": 1, "name": "a"}
 
     def test_query_one_as_dict_returns_none_when_no_rows(self, tmp_path):
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         db.execute("CREATE TABLE t (id INTEGER)")
 
         assert db.query_one_as_dict("SELECT id FROM t") is None
@@ -445,7 +467,7 @@ class TestDatabaseManager:
         pooled to discard, but the engine stays usable afterward - dispose()
         only clears idle pooled connections, it doesn't tear down the engine.
         """
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
 
         db.close()
 
@@ -460,7 +482,7 @@ class TestDatabaseManager:
         PID it must parse is unpredictable at record time) - test it
         directly instead, with no mocking of the class under test.
         """
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         wal_path = db.db_path + ".wal"
         with open(wal_path, "w"):
             pass
@@ -483,7 +505,7 @@ class TestDatabaseManager:
         """The no-WAL-file branch: DuckDB can hold a lock with no .wal on
         disk, and that's still a stale-lock-cleared case, not a decline.
         """
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
         assert not os.path.exists(db.db_path + ".wal")
 
         def fake_kill(pid, sig):
@@ -498,7 +520,7 @@ class TestDatabaseManager:
         assert cleared is True
 
     def test_clear_stale_lock_declines_when_holder_is_alive(self, tmp_path):
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
 
         cleared = db._try_clear_stale_lock(
             Exception(f"Conflicting lock is held in /x (PID {os.getpid()})")
@@ -507,7 +529,7 @@ class TestDatabaseManager:
         assert cleared is False
 
     def test_clear_stale_lock_declines_when_message_has_no_pid(self, tmp_path):
-        db = DatabaseManager(str(tmp_path / "test.db"))
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
 
         cleared = db._try_clear_stale_lock(Exception("IO Error: disk full"))
 
@@ -521,6 +543,29 @@ class TestDatabaseManager:
         db2 = get_database()
         assert db2 is db
 
-        # Verify calling DatabaseManager() directly also returns the same instance
-        db3 = DatabaseManager(IN_MEMORY_DB_PATH)
+        # Verify calling DuckDBDatabaseManager() directly also returns the same instance
+        db3 = DuckDBDatabaseManager(IN_MEMORY_DB_PATH)
         assert db3 is db
+
+    def test_execute_strips_tzinfo_from_aware_datetime_params(self, tmp_path):
+        from datetime import datetime, timezone
+
+        db = DuckDBDatabaseManager(str(tmp_path / "test.db"))
+        db.execute("CREATE TABLE t (ts TIMESTAMP)")
+        aware = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        db.execute("INSERT INTO t VALUES (?)", [aware])
+
+        stored = db.query_one("SELECT ts FROM t")[0]
+        assert stored.tzinfo is None
+        assert stored == aware.replace(tzinfo=None)
+
+    def test_make_engine_raises_actionable_error_when_duckdb_engine_missing(
+        self, tmp_path, monkeypatch
+    ):
+        import sys
+
+        monkeypatch.setitem(sys.modules, "duckdb_engine", None)
+
+        with pytest.raises(RuntimeError, match=r"\[duckdb\]"):
+            DuckDBDatabaseManager(str(tmp_path / "test.db"))

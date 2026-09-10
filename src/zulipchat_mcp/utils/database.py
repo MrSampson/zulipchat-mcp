@@ -15,13 +15,13 @@ import os
 import re
 import threading
 import time
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from typing import Any, TypeVar
 
 from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
-
-from .migrations import make_engine, run_migrations
 
 T = TypeVar("T")
 
@@ -40,12 +40,12 @@ class DatabaseLockedError(Exception):
         )
 
 
-class DatabaseManager:
-    """DuckDB database manager for ZulipChat MCP.
+class DatabaseManager(ABC):
+    """Abstract base for backend-specific persistence managers.
 
-    Uses short-lived connections for write operations to support concurrent
-    access from multiple MCP server instances. Write operations acquire the
-    lock, execute, and release immediately.
+    Owns the singleton lifecycle, the six query/execute methods, and the
+    lock-retry loop shared by every file-based backend. Subclasses provide
+    the engine/pool, the migration entry point, and native upsert SQL.
     """
 
     _instance = None
@@ -62,7 +62,8 @@ class DatabaseManager:
         """Initialize database manager.
 
         Args:
-            db_path: Path to the DuckDB database file
+            db_path: Backend-specific connection identifier (file path for
+                sqlite/duckdb; a redacted display string for postgres).
             max_retries: Maximum number of retry attempts on lock contention
             retry_delay: Base delay between retries (uses exponential backoff)
         """
@@ -75,11 +76,229 @@ class DatabaseManager:
         self.retry_delay = retry_delay
         self._write_lock = threading.RLock()  # Thread safety within process
         self._initialized: bool = False
-        self._engine: Engine = make_engine(db_path)
+        self._engine: Engine = self._make_engine(db_path)
 
-        # run_migrations() creates db_path's parent directory itself.
         self._run_migrations_with_retry()
         self._initialized = True
+
+    @abstractmethod
+    def _make_engine(self, db_path: str) -> Engine:
+        """Build this backend's SQLAlchemy Engine."""
+
+    @abstractmethod
+    def _run_migrations(self) -> None:
+        """Run this backend's Alembic migrations against self.db_path."""
+
+    @abstractmethod
+    def upsert(
+        self,
+        table: str,
+        columns: Sequence[str],
+        values: Sequence[Any],
+        conflict_column: str,
+    ) -> None:
+        """Insert `values` into `table`, replacing the row on conflict."""
+
+    def _translate_sql(self, sql: str) -> str:
+        """Translate `?`-style positional placeholders for this backend's
+        driver paramstyle. Identity by default - qmark-native drivers
+        (duckdb, sqlite3) need no translation; Postgres overrides this.
+        """
+        return sql
+
+    def _try_clear_stale_lock(self, error: BaseException) -> bool:
+        """Check if the lock is held by a dead process and clear it if so.
+
+        Default: never clears (no PID information to parse). DuckDB
+        overrides this with its PID-parsing implementation.
+        """
+        return False
+
+    def _unwrap_lock_error_or_raise(self, error: OperationalError) -> BaseException:
+        """Return the unwrapped original error if `error` looks like lock
+        contention, else re-raise `error` unmangled (a genuine non-lock
+        OperationalError, e.g. a real schema bug, must propagate as itself).
+
+        `.orig` is the underlying driver exception's precise message;
+        `str(error)` also includes the SQL statement and a sqlalche.me URL,
+        which could coincidentally contain "lock".
+        """
+        original = error.orig if error.orig is not None else error
+        if "lock" not in str(original).lower():
+            raise error
+        return original
+
+    def _with_lock_retry(self, operation: Callable[[], T]) -> T:
+        """Run `operation`, retrying only on lock contention.
+
+        Shared by every short-lived-connection call (execute/query/...) and
+        by migration startup. A genuine non-lock OperationalError propagates
+        as itself. Lock contention retries with exponential backoff, except
+        when a stale lock from a dead process was cleared - that retries
+        immediately since there's nothing left to wait out.
+        """
+        last_error: OperationalError | None = None
+        for attempt in range(self.max_retries):
+            try:
+                return operation()
+            except OperationalError as e:
+                last_error = e
+                original = self._unwrap_lock_error_or_raise(e)
+                if self._try_clear_stale_lock(original):
+                    continue
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (2**attempt))
+                    continue
+                raise DatabaseLockedError(self.db_path, e) from e
+
+        raise DatabaseLockedError(
+            self.db_path, last_error or RuntimeError("max_retries must be >= 1")
+        )
+
+    def _run_migrations_with_retry(self) -> None:
+        """Run migrations with retry logic for lock contention."""
+        self._with_lock_retry(self._run_migrations)
+
+    def execute(
+        self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
+    ) -> None:
+        """Execute a single write operation with short-lived connection.
+
+        Opens a connection via the engine, executes the statement in a
+        transaction, and releases the connection immediately (NullPool) to
+        release the file lock.
+
+        Args:
+            sql: SQL statement to execute
+            params: Parameters for the SQL statement
+        """
+        sql = self._translate_sql(sql)
+
+        def _op() -> None:
+            with self._engine.begin() as conn:
+                conn.exec_driver_sql(sql, _normalize_params(params) if params else ())
+
+        with self._write_lock:  # Thread safety within process
+            self._with_lock_retry(_op)
+
+    def executemany(
+        self, sql: str, seq_params: Sequence[list[Any] | tuple[Any, ...]]
+    ) -> None:
+        """Execute multiple write operations in a single transaction.
+
+        Args:
+            sql: SQL statement to execute
+            seq_params: One parameter sequence per row - list or tuple,
+                mirroring execute()'s single-row params (each row is coerced
+                to a tuple before reaching the driver, since SQLAlchemy's
+                parameter distiller rejects a bare list there)
+        """
+        sql = self._translate_sql(sql)
+
+        def _op() -> None:
+            with self._engine.begin() as conn:
+                for params in seq_params:
+                    conn.exec_driver_sql(sql, _normalize_params(params))
+
+        with self._write_lock:
+            self._with_lock_retry(_op)
+
+    def query(
+        self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
+    ) -> list[tuple[Any, ...]]:
+        """Execute a read query and return results."""
+        sql = self._translate_sql(sql)
+
+        def _op() -> list[tuple[Any, ...]]:
+            with self._engine.connect() as conn:
+                cursor = conn.exec_driver_sql(
+                    sql, _normalize_params(params) if params else ()
+                )
+                return [tuple(row) for row in cursor.fetchall()]
+
+        return self._with_lock_retry(_op)
+
+    def query_one(
+        self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
+    ) -> tuple[Any, ...] | None:
+        """Execute a read query and return the first result."""
+        sql = self._translate_sql(sql)
+
+        def _op() -> tuple[Any, ...] | None:
+            with self._engine.connect() as conn:
+                cursor = conn.exec_driver_sql(
+                    sql, _normalize_params(params) if params else ()
+                )
+                row = cursor.fetchone()
+                return tuple(row) if row is not None else None
+
+        return self._with_lock_retry(_op)
+
+    def query_as_dicts(
+        self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
+    ) -> list[dict[str, Any]]:
+        """Execute a read query and return results as dictionaries."""
+        sql = self._translate_sql(sql)
+
+        def _op() -> list[dict[str, Any]]:
+            with self._engine.connect() as conn:
+                cursor = conn.exec_driver_sql(
+                    sql, _normalize_params(params) if params else ()
+                )
+                return [dict(row) for row in cursor.mappings()]
+
+        return self._with_lock_retry(_op)
+
+    def query_one_as_dict(
+        self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
+    ) -> dict[str, Any] | None:
+        """Execute a read query and return the first result as a dictionary."""
+        sql = self._translate_sql(sql)
+
+        def _op() -> dict[str, Any] | None:
+            with self._engine.connect() as conn:
+                cursor = conn.exec_driver_sql(
+                    sql, _normalize_params(params) if params else ()
+                )
+                row = cursor.mappings().first()
+                return dict(row) if row is not None else None
+
+        return self._with_lock_retry(_op)
+
+    def close(self) -> None:
+        """Dispose the engine's connection pool."""
+        self._engine.dispose()
+
+    def __del__(self) -> None:  # noqa: B027 - shared no-op default, not abstract
+        """Cleanup (no-op, connections are short-lived)."""
+        pass
+
+
+class DuckDBDatabaseManager(DatabaseManager):
+    """DuckDB-backed persistence manager.
+
+    Uses short-lived connections for write operations to support concurrent
+    access from multiple MCP server instances. Write operations acquire the
+    lock, execute, and release immediately.
+    """
+
+    def _make_engine(self, db_path: str) -> Engine:
+        try:
+            import duckdb_engine  # noqa: F401 - registers the "duckdb" SQLAlchemy dialect
+        except ImportError as exc:
+            raise RuntimeError(
+                "DATABASE_BACKEND=duckdb requires the 'duckdb' extra: "
+                "install with `pip install zulipchat-mcp[duckdb]` "
+                "(or `uv add zulipchat-mcp[duckdb]`)."
+            ) from exc
+        from .migrations import make_engine
+
+        return make_engine(db_path)
+
+    def _run_migrations(self) -> None:
+        from .migrations import run_migrations
+
+        run_migrations(self.db_path)
 
     def _try_clear_stale_lock(self, error: BaseException) -> bool:
         """Check if the lock is held by a dead process and clear it if so.
@@ -119,169 +338,46 @@ class DatabaseManager:
             logger.info(f"Locking process (PID {pid}) is dead; retrying connect")
         return True
 
-    def _unwrap_lock_error_or_raise(self, error: OperationalError) -> BaseException:
-        """Return the unwrapped original error if `error` looks like lock
-        contention, else re-raise `error` unmangled (a genuine non-lock
-        OperationalError, e.g. a real schema bug, must propagate as itself).
-
-        `.orig` is the underlying duckdb exception's precise message;
-        `str(error)` also includes the SQL statement and a sqlalche.me URL,
-        which could coincidentally contain "lock".
-        """
-        original = error.orig if error.orig is not None else error
-        if "lock" not in str(original).lower():
-            raise error
-        return original
-
-    def _with_lock_retry(self, operation: Callable[[], T]) -> T:
-        """Run `operation`, retrying only on DuckDB lock contention.
-
-        Shared by every short-lived-connection call (execute/query/...) and
-        by migration startup. A genuine non-lock OperationalError propagates
-        as itself. Lock contention retries with exponential backoff, except
-        when a stale lock from a dead process was cleared - that retries
-        immediately since there's nothing left to wait out.
-        """
-        last_error: OperationalError | None = None
-        for attempt in range(self.max_retries):
-            try:
-                return operation()
-            except OperationalError as e:
-                last_error = e
-                original = self._unwrap_lock_error_or_raise(e)
-                if self._try_clear_stale_lock(original):
-                    continue
-                if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay * (2**attempt))
-                    continue
-                raise DatabaseLockedError(self.db_path, e) from e
-
-        raise DatabaseLockedError(
-            self.db_path, last_error or RuntimeError("max_retries must be >= 1")
-        )
-
-    def _run_migrations_with_retry(self) -> None:
-        """Run migrations with retry logic for lock contention."""
-        self._with_lock_retry(lambda: run_migrations(self.db_path))
-
-    def execute(
-        self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
+    def upsert(
+        self,
+        table: str,
+        columns: Sequence[str],
+        values: Sequence[Any],
+        conflict_column: str,
     ) -> None:
-        """Execute a single write operation with short-lived connection.
+        # conflict_column is unused: INSERT OR REPLACE's conflict target is
+        # implicitly the table's primary key, which is already conflict_column
+        # for every caller today. Kept in the signature for parity with
+        # PostgresDatabaseManager.upsert(), which needs it explicitly.
+        del conflict_column
+        self.execute(_insert_or_replace_sql(table, columns), tuple(values))
 
-        Opens a connection via the engine, executes the statement in a
-        transaction, and releases the connection immediately (NullPool) to
-        release the file lock.
 
-        Args:
-            sql: SQL statement to execute
-            params: Parameters for the SQL statement
-        """
+def _insert_or_replace_sql(table: str, columns: Sequence[str]) -> str:
+    """Shared by DuckDBDatabaseManager and SqliteDatabaseManager - both
+    support SQLite's INSERT OR REPLACE INTO syntax natively.
+    """
+    placeholders = ", ".join(["?"] * len(columns))
+    column_list = ", ".join(columns)
+    return f"INSERT OR REPLACE INTO {table} ({column_list}) VALUES ({placeholders})"
 
-        def _op() -> None:
-            with self._engine.begin() as conn:
-                conn.exec_driver_sql(sql, tuple(params) if params else ())
 
-        with self._write_lock:  # Thread safety within process
-            self._with_lock_retry(_op)
+def _strip_tzinfo(value: Any) -> Any:
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    return value
 
-    def executemany(
-        self, sql: str, seq_params: Sequence[list[Any] | tuple[Any, ...]]
-    ) -> None:
-        """Execute multiple write operations in a single transaction.
 
-        Opens a connection via the engine, executes all statements, and
-        releases the connection immediately.
-
-        Args:
-            sql: SQL statement to execute
-            seq_params: One parameter sequence per row - list or tuple,
-                mirroring execute()'s single-row params (each row is coerced
-                to a tuple before reaching the driver, since SQLAlchemy's
-                parameter distiller rejects a bare list there)
-        """
-
-        def _op() -> None:
-            with self._engine.begin() as conn:
-                for params in seq_params:
-                    conn.exec_driver_sql(sql, tuple(params))
-
-        with self._write_lock:
-            self._with_lock_retry(_op)
-
-    def query(
-        self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
-    ) -> list[tuple[Any, ...]]:
-        """Execute a read query and return results.
-
-        Uses short-lived connection with retry for lock contention.
-
-        Args:
-            sql: SQL query to execute
-            params: Parameters for the SQL query
-
-        Returns:
-            List of result tuples
-        """
-
-        def _op() -> list[tuple[Any, ...]]:
-            with self._engine.connect() as conn:
-                cursor = conn.exec_driver_sql(sql, tuple(params) if params else ())
-                return [tuple(row) for row in cursor.fetchall()]
-
-        return self._with_lock_retry(_op)
-
-    def query_one(
-        self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
-    ) -> tuple[Any, ...] | None:
-        """Execute a read query and return the first result."""
-
-        def _op() -> tuple[Any, ...] | None:
-            with self._engine.connect() as conn:
-                cursor = conn.exec_driver_sql(sql, tuple(params) if params else ())
-                row = cursor.fetchone()
-                return tuple(row) if row is not None else None
-
-        return self._with_lock_retry(_op)
-
-    def query_as_dicts(
-        self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
-    ) -> list[dict[str, Any]]:
-        """Execute a read query and return results as dictionaries."""
-
-        def _op() -> list[dict[str, Any]]:
-            with self._engine.connect() as conn:
-                cursor = conn.exec_driver_sql(sql, tuple(params) if params else ())
-                return [dict(row) for row in cursor.mappings()]
-
-        return self._with_lock_retry(_op)
-
-    def query_one_as_dict(
-        self, sql: str, params: list[Any] | tuple[Any, ...] | None = None
-    ) -> dict[str, Any] | None:
-        """Execute a read query and return the first result as a dictionary."""
-
-        def _op() -> dict[str, Any] | None:
-            with self._engine.connect() as conn:
-                cursor = conn.exec_driver_sql(sql, tuple(params) if params else ())
-                row = cursor.mappings().first()
-                return dict(row) if row is not None else None
-
-        return self._with_lock_retry(_op)
-
-    def close(self) -> None:
-        """Dispose the engine's connection pool.
-
-        Safe to call even though connections are short-lived: NullPool has
-        nothing pooled to discard, and the engine stays usable afterward -
-        dispose() only clears idle pooled connections, it doesn't tear down
-        the engine.
-        """
-        self._engine.dispose()
-
-    def __del__(self) -> None:
-        """Cleanup (no-op, connections are short-lived)."""
-        pass
+def _normalize_params(params: Sequence[Any]) -> tuple[Any, ...]:
+    """Strip tzinfo from aware datetimes so every backend stores the same
+    naive wall-clock value into schema.py's naive DateTime columns.
+    Postgres in particular would otherwise silently shift the stored value
+    by the session's configured TimeZone when casting an aware value to
+    `timestamp without time zone` - stripping here, once, centrally, means
+    no backend-specific handling is needed at any of the ~40 call sites in
+    database_manager.py.
+    """
+    return tuple(_strip_tzinfo(v) for v in params)
 
 
 # Global database manager instance
@@ -297,7 +393,7 @@ def get_database() -> DatabaseManager:
     global _db_manager
     if _db_manager is None:
         db_path = os.getenv("ZULIPCHAT_DB_PATH", ".mcp/zulipchat/zulipchat.duckdb")
-        _db_manager = DatabaseManager(db_path)
+        _db_manager = DuckDBDatabaseManager(db_path)
     return _db_manager
 
 
@@ -313,5 +409,5 @@ def init_database(db_path: str | None = None) -> DatabaseManager:
     global _db_manager
     if db_path is None:
         db_path = os.getenv("ZULIPCHAT_DB_PATH", ".mcp/zulipchat/zulipchat.duckdb")
-    _db_manager = DatabaseManager(db_path)
+    _db_manager = DuckDBDatabaseManager(db_path)
     return _db_manager
