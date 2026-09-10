@@ -381,6 +381,103 @@ class SqliteDatabaseManager(DatabaseManager):
         self.execute(_insert_or_replace_sql(table, columns), tuple(values))
 
 
+class PostgresDatabaseManager(DatabaseManager):
+    """Postgres-backed persistence manager. Multi-writer, so no file-lock
+    retry logic - a real connection pool (QueuePool, SQLAlchemy's default)
+    instead of the short-lived NullPool the file-based backends need.
+    """
+
+    def __init__(
+        self,
+        host: str | None,
+        port: int,
+        dbname: str | None,
+        user: str | None,
+        password: str | None,
+        max_retries: int = 5,
+        retry_delay: float = 0.1,
+    ) -> None:
+        # Stashed before calling super().__init__(): the base class's
+        # __init__ immediately calls self._make_engine(db_path), and
+        # _make_engine below reads these instead of its db_path argument
+        # (which is only a redacted display string, never real connection
+        # info - see _make_engine's docstring).
+        self._pg_host = host
+        self._pg_port = port
+        self._pg_dbname = dbname
+        self._pg_user = user
+        self._pg_password = password
+        display = f"postgresql://{user}@{host}:{port}/{dbname}"
+        super().__init__(display, max_retries, retry_delay)
+
+    def _make_engine(self, db_path: str) -> Engine:
+        """Ignores db_path (a redacted display string, never the real
+        connection info - password must never end up in self.db_path,
+        which DatabaseLockedError messages and logs may surface verbatim).
+        Builds the real URL from the fields __init__ stashed on self.
+        """
+        del db_path
+        from sqlalchemy import create_engine
+
+        try:
+            import psycopg  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "DATABASE_BACKEND=postgres requires the 'postgres' extra: "
+                "install with `pip install zulipchat-mcp[postgres]` "
+                "(or `uv add zulipchat-mcp[postgres]`)."
+            ) from exc
+
+        self._url = (
+            f"postgresql+psycopg://{self._pg_user}:{self._pg_password}"
+            f"@{self._pg_host}:{self._pg_port}/{self._pg_dbname}"
+        )
+        return create_engine(self._url)
+
+    def _run_migrations(self) -> None:
+        from .migrations import run_postgres_migrations
+
+        run_postgres_migrations(self._url)
+
+    def _translate_sql(self, sql: str) -> str:
+        """psycopg defaults to pyformat (%s); every call site in
+        database_manager.py is written with duckdb/sqlite's native `?`
+        qmark placeholders, so translate here rather than rewriting ~40
+        call sites. Safe because no SQL string in this codebase contains a
+        literal `%` outside a bound parameter value (verified: only `%` in
+        the codebase is inside a LIKE pattern passed as a parameter, not
+        embedded in SQL text).
+        """
+        return sql.replace("?", "%s")
+
+    def _with_lock_retry(self, operation: Callable[[], T]) -> T:
+        """No retry: Postgres is multi-writer, so there's no single-file OS
+        lock to wait out. A real connection error still propagates as itself.
+        """
+        return operation()
+
+    def upsert(
+        self,
+        table: str,
+        columns: Sequence[str],
+        values: Sequence[Any],
+        conflict_column: str,
+    ) -> None:
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        from .schema import metadata
+
+        table_obj = metadata.tables[table]
+        row = dict(zip(columns, values, strict=True))
+        stmt = pg_insert(table_obj).values(**row)
+        update_cols = {c: stmt.excluded[c] for c in columns if c != conflict_column}
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[conflict_column], set_=update_cols
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+
 def _insert_or_replace_sql(table: str, columns: Sequence[str]) -> str:
     """Shared by DuckDBDatabaseManager and SqliteDatabaseManager - both
     support SQLite's INSERT OR REPLACE INTO syntax natively.

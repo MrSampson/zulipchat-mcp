@@ -10,11 +10,12 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import pytest
 from sqlalchemy.exc import DataError, OperationalError, ProgrammingError
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool, QueuePool
 
 from src.zulipchat_mcp.utils.database import (
     DatabaseLockedError,
     DuckDBDatabaseManager,
+    PostgresDatabaseManager,
     SqliteDatabaseManager,
     get_database,
     init_database,
@@ -638,3 +639,132 @@ class TestSqliteDatabaseManager:
         result = db.query_as_dicts("SELECT id, name FROM t ORDER BY id")
 
         assert result == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
+
+
+class TestPostgresDatabaseManager:
+    """Unit tests only - no real Postgres connection. Engine construction
+    and SQL generation are tested directly; execute()/query() behavior is
+    already covered generically by the base class tests on the other two
+    backends, so this class focuses on what's actually different: engine
+    URL/pool, placeholder translation, no lock retry, and upsert SQL shape.
+    """
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        PostgresDatabaseManager._instance = None
+        with patch("src.zulipchat_mcp.utils.database._db_manager", None):
+            yield
+        PostgresDatabaseManager._instance = None
+
+    @pytest.fixture(autouse=True)
+    def no_real_migrations(self):
+        """Every test in this class constructs a real Engine (to prove the
+        URL/pool are right) but must never actually run migrations against
+        a real network connection.
+        """
+        with patch.object(PostgresDatabaseManager, "_run_migrations"):
+            yield
+
+    def test_make_engine_uses_queue_pool_and_correct_url(self):
+        db = PostgresDatabaseManager(
+            host="db.internal",
+            port=6543,
+            dbname="zulipchat",
+            user="mcp",
+            password="s3cret",
+        )
+
+        assert isinstance(db._engine.pool, QueuePool)
+        assert db._engine.url.drivername == "postgresql+psycopg"
+        assert db._engine.url.host == "db.internal"
+        assert db._engine.url.port == 6543
+        assert db._engine.url.database == "zulipchat"
+        assert db._engine.url.username == "mcp"
+
+    def test_db_path_display_string_excludes_password(self):
+        db = PostgresDatabaseManager(
+            host="db.internal",
+            port=5432,
+            dbname="zulipchat",
+            user="mcp",
+            password="s3cret",
+        )
+
+        assert "s3cret" not in db.db_path
+
+    def test_translate_sql_converts_qmark_to_pyformat(self):
+        db = PostgresDatabaseManager(
+            host="h",
+            port=5432,
+            dbname="d",
+            user="u",
+            password="p",
+        )
+
+        assert db._translate_sql("SELECT * FROM t WHERE a = ? AND b = ?") == (
+            "SELECT * FROM t WHERE a = %s AND b = %s"
+        )
+
+    def test_with_lock_retry_calls_operation_once_without_retrying(self):
+        db = PostgresDatabaseManager(
+            host="h",
+            port=5432,
+            dbname="d",
+            user="u",
+            password="p",
+        )
+        calls = []
+
+        def _op():
+            calls.append(1)
+            return "ok"
+
+        assert db._with_lock_retry(_op) == "ok"
+        assert calls == [1]
+
+    def test_make_engine_raises_actionable_error_when_psycopg_missing(
+        self, monkeypatch
+    ):
+        import sys
+
+        monkeypatch.setitem(sys.modules, "psycopg", None)
+
+        with pytest.raises(RuntimeError, match=r"\[postgres\]"):
+            PostgresDatabaseManager(
+                host="h",
+                port=5432,
+                dbname="d",
+                user="u",
+                password="p",
+            )
+
+    def test_upsert_builds_on_conflict_do_update(self):
+        db = PostgresDatabaseManager(
+            host="h",
+            port=5432,
+            dbname="d",
+            user="u",
+            password="p",
+        )
+        executed = []
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = lambda stmt: executed.append(stmt)
+        db._engine = MagicMock()
+        db._engine.begin.return_value = _mock_context_manager(mock_conn)
+
+        db.upsert(
+            "agent_profiles",
+            ["agent_id", "agent_name"],
+            ["agent-1", "claude"],
+            "agent_id",
+        )
+
+        compiled = str(
+            executed[0].compile(
+                dialect=__import__(
+                    "sqlalchemy.dialects.postgresql", fromlist=["dialect"]
+                ).dialect()
+            )
+        )
+        assert "ON CONFLICT" in compiled
+        assert "agent_profiles" in compiled

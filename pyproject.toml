@@ -73,6 +73,7 @@ dev = [
     "types-requests>=2.32.4.20260107",
     "types-python-dateutil>=2.9.0.20251115",
     "build>=1.4.0",
+    "psycopg[binary]>=3.2",
 ]
 
 [project.urls]

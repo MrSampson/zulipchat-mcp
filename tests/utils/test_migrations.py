@@ -17,6 +17,7 @@ from src.zulipchat_mcp.utils.migrations import (
     IN_MEMORY_DB_PATH,
     _alembic_config,
     run_migrations,
+    run_postgres_migrations,
     run_sqlite_migrations,
 )
 from src.zulipchat_mcp.utils.schema import metadata
@@ -203,10 +204,34 @@ def test_sqlite_in_memory_database_does_not_leak_a_literal_memory_file_to_disk(
     assert not (tmp_path / IN_MEMORY_DB_PATH).exists()
 
 
-def test_sqlite_running_twice_on_the_same_database_does_not_raise(tmp_path: Path) -> None:
+def test_sqlite_running_twice_on_the_same_database_does_not_raise(
+    tmp_path: Path,
+) -> None:
     db_path = str(tmp_path / "fresh.sqlite3")
 
     run_sqlite_migrations(db_path)
     run_sqlite_migrations(db_path)
 
     assert _sqlite_table_names(db_path) >= _REAL_TABLE_NAMES
+
+
+def test_run_postgres_migrations_builds_config_without_legacy_check(monkeypatch):
+    """No real Postgres needed: prove run_postgres_migrations never calls
+    the DuckDB-only legacy-stamp check, by making that check raise if
+    called - if run_postgres_migrations tried to call it, this test fails
+    loudly instead of silently connecting to a bogus DuckDB path.
+    """
+
+    def _boom(db_path: str) -> bool:
+        raise AssertionError("_needs_legacy_stamp must not run for postgres")
+
+    monkeypatch.setattr("src.zulipchat_mcp.utils.migrations._needs_legacy_stamp", _boom)
+    calls = []
+    monkeypatch.setattr(
+        "src.zulipchat_mcp.utils.migrations.command.upgrade",
+        lambda cfg, rev: calls.append(rev),
+    )
+
+    run_postgres_migrations("postgresql+psycopg://u:p@host:5432/db")
+
+    assert calls == ["head"]

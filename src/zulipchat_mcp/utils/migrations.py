@@ -113,7 +113,9 @@ def _run_migrations_for_url(url: str, *, check_legacy_stamp_path: str | None) ->
     pre-Alembic install (sqlite, postgres).
     """
     cfg = _alembic_config_for_url(url)
-    if check_legacy_stamp_path is not None and _needs_legacy_stamp(check_legacy_stamp_path):
+    if check_legacy_stamp_path is not None and _needs_legacy_stamp(
+        check_legacy_stamp_path
+    ):
         command.stamp(cfg, INITIAL_REVISION)
     command.upgrade(cfg, "head")
 
@@ -137,4 +139,15 @@ def run_sqlite_migrations(db_path: str) -> None:
     """
     if db_path != IN_MEMORY_DB_PATH:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    _run_migrations_for_url(sqlite_sqlalchemy_url(db_path), check_legacy_stamp_path=None)
+    _run_migrations_for_url(
+        sqlite_sqlalchemy_url(db_path), check_legacy_stamp_path=None
+    )
+
+
+def run_postgres_migrations(url: str) -> None:
+    """Bring the Postgres database at url up to the latest schema revision.
+
+    Postgres is a new backend - there are no pre-Alembic installs to stamp,
+    and no local directory to create (a connection string, not a file path).
+    """
+    _run_migrations_for_url(url, check_legacy_stamp_path=None)
