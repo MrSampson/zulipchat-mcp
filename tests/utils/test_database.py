@@ -540,15 +540,20 @@ class TestDatabaseManager:
 
     def test_global_instances(self):
         """Test global instance helpers."""
-        db = init_database(IN_MEMORY_DB_PATH)
+        from src.zulipchat_mcp.config import DatabaseBackend, DatabaseConfig
+
+        db = init_database(
+            DatabaseConfig(backend=DatabaseBackend.DUCKDB, path=IN_MEMORY_DB_PATH)
+        )
         assert db is not None
+        assert isinstance(db, DuckDBDatabaseManager)
 
         db2 = get_database()
         assert db2 is db
 
-        # Verify calling DuckDBDatabaseManager() directly also returns the same instance
-        db3 = DuckDBDatabaseManager(IN_MEMORY_DB_PATH)
-        assert db3 is db
+    def test_get_database_raises_before_init_database_called(self):
+        with pytest.raises(RuntimeError, match="not initialized"):
+            get_database()
 
     def test_execute_strips_tzinfo_from_aware_datetime_params(self, tmp_path):
         from datetime import datetime, timezone

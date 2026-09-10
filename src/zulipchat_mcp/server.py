@@ -156,7 +156,7 @@ def main() -> None:
     # Initialize database (optional for agent features)
     if database_available:
         try:
-            init_database()
+            init_database(config_manager.config.database)
             logger.info("Database initialized")
         except Exception as e:
             logger.warning(f"Database initialization failed: {e}")

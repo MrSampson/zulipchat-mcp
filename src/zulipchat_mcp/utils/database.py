@@ -23,6 +23,8 @@ from typing import Any, TypeVar
 from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
 
+from ..config import DatabaseBackend, DatabaseConfig
+
 T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
@@ -509,30 +511,41 @@ def _normalize_params(params: Sequence[Any]) -> tuple[Any, ...]:
 _db_manager: DatabaseManager | None = None
 
 
-def get_database() -> DatabaseManager:
-    """Get or create the global database manager instance.
+def init_database(config: DatabaseConfig) -> DatabaseManager:
+    """Initialize the global database manager for the given backend config.
 
-    Returns:
-        Global DatabaseManager instance
+    Must be called once at server startup (mirrors init_config_manager()).
+    Subsequent calls reinitialize (useful for testing).
     """
     global _db_manager
-    if _db_manager is None:
-        db_path = os.getenv("ZULIPCHAT_DB_PATH", ".mcp/zulipchat/zulipchat.duckdb")
-        _db_manager = DuckDBDatabaseManager(db_path)
+    backend = config.backend
+    if backend is DatabaseBackend.DUCKDB:
+        if config.path is None:
+            raise ValueError("DatabaseConfig.path is required for the duckdb backend")
+        _db_manager = DuckDBDatabaseManager(config.path)
+    elif backend is DatabaseBackend.SQLITE:
+        if config.path is None:
+            raise ValueError("DatabaseConfig.path is required for the sqlite backend")
+        _db_manager = SqliteDatabaseManager(config.path)
+    elif backend is DatabaseBackend.POSTGRES:
+        _db_manager = PostgresDatabaseManager(
+            host=config.postgres_host,
+            port=config.postgres_port,
+            dbname=config.postgres_db,
+            user=config.postgres_user,
+            password=config.postgres_password,
+        )
+    else:
+        raise ValueError(f"Unsupported DATABASE_BACKEND: {backend}")
     return _db_manager
 
 
-def init_database(db_path: str | None = None) -> DatabaseManager:
-    """Initialize the global database manager with a specific path.
+def get_database() -> DatabaseManager:
+    """Get the global database manager instance.
 
-    Args:
-        db_path: Path to the database file, uses default if None
-
-    Returns:
-        Initialized DatabaseManager instance
+    Raises:
+        RuntimeError: If init_database() was not called first.
     """
-    global _db_manager
-    if db_path is None:
-        db_path = os.getenv("ZULIPCHAT_DB_PATH", ".mcp/zulipchat/zulipchat.duckdb")
-    _db_manager = DuckDBDatabaseManager(db_path)
+    if _db_manager is None:
+        raise RuntimeError("Database not initialized. Call init_database() first.")
     return _db_manager
