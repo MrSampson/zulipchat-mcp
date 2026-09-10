@@ -11,6 +11,7 @@ from src.zulipchat_mcp.setup_wizard import (
     generate_claude_code_command,
     generate_mcp_config,
     get_mcp_client_config_path,
+    prompt_database_backend,
     scan_for_zuliprc_files,
     select_identity,
     validate_zuliprc,
@@ -286,3 +287,104 @@ class TestIdentitySelectionHeuristics:
             result = select_identity([user_cfg, bot_cfg], "Bot")
             assert result == {"ok": True}
             mock_validate.assert_called_once_with(bot_cfg)
+
+
+class TestPromptDatabaseBackend:
+    """Tests for prompt_database_backend."""
+
+    def test_defaults_to_skip_returns_no_env(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _: "")
+
+        env = prompt_database_backend()
+
+        assert env == {}
+
+    def test_duckdb_returns_backend_env(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _: "1")
+
+        env = prompt_database_backend()
+
+        assert env == {"DATABASE_BACKEND": "duckdb"}
+
+    def test_sqlite_returns_backend_env(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _: "2")
+
+        env = prompt_database_backend()
+
+        assert env == {"DATABASE_BACKEND": "sqlite"}
+
+    def test_postgres_prompts_for_connection_fields(self, monkeypatch):
+        answers = iter(["3", "db.internal", "6543", "zulipchat", "mcp", "s3cret"])
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
+
+        env = prompt_database_backend()
+
+        assert env == {
+            "DATABASE_BACKEND": "postgres",
+            "POSTGRES_HOST": "db.internal",
+            "POSTGRES_PORT": "6543",
+            "POSTGRES_DB": "zulipchat",
+            "POSTGRES_USER": "mcp",
+            "POSTGRES_PASSWORD": "s3cret",
+        }
+
+    def test_explicit_skip_returns_no_env(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _: "4")
+
+        env = prompt_database_backend()
+
+        assert env == {}
+
+
+class TestGenerateMcpConfigEnv:
+    """Tests for env threading through generate_mcp_config."""
+
+    def test_includes_env_when_provided(self):
+        user_config = {"path": "/home/u/.zuliprc"}
+
+        config = generate_mcp_config(
+            user_config,
+            extended_tools=False,
+            use_uvx=True,
+            env={"DATABASE_BACKEND": "postgres"},
+        )
+
+        assert config["env"] == {"DATABASE_BACKEND": "postgres"}
+
+    def test_omits_env_when_not_provided(self):
+        user_config = {"path": "/home/u/.zuliprc"}
+
+        config = generate_mcp_config(user_config, extended_tools=False, use_uvx=True)
+
+        assert "env" not in config
+
+    def test_omits_env_when_empty(self):
+        user_config = {"path": "/home/u/.zuliprc"}
+
+        config = generate_mcp_config(
+            user_config, extended_tools=False, use_uvx=True, env={}
+        )
+
+        assert "env" not in config
+
+
+class TestGenerateClaudeCodeCommandEnv:
+    """Tests for env threading through generate_claude_code_command."""
+
+    def test_includes_database_env_flags(self):
+        user_config = {"path": "/home/u/.zuliprc"}
+
+        command = generate_claude_code_command(
+            user_config,
+            env={"DATABASE_BACKEND": "postgres", "POSTGRES_HOST": "db"},
+        )
+
+        assert "-e DATABASE_BACKEND=postgres" in command
+        assert "-e POSTGRES_HOST=db" in command
+
+    def test_omits_env_flags_when_not_provided(self):
+        user_config = {"path": "/home/u/.zuliprc"}
+
+        command = generate_claude_code_command(user_config)
+
+        assert "DATABASE_BACKEND" not in command

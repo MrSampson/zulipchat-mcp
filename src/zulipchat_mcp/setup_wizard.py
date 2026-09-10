@@ -333,6 +333,7 @@ def generate_mcp_config(
     *,
     extended_tools: bool = False,
     use_uvx: bool = False,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Generate MCP server configuration."""
     command = shutil.which("uv") or "uv"
@@ -342,10 +343,13 @@ def generate_mcp_config(
         extended_tools=extended_tools,
         use_uvx=use_uvx,
     )
-    return {
+    config: dict[str, Any] = {
         "command": command,
         "args": args,
     }
+    if env:
+        config["env"] = env
+    return config
 
 
 def generate_claude_code_command(
@@ -353,6 +357,7 @@ def generate_claude_code_command(
     bot_config: dict[str, Any] | None = None,
     *,
     extended_tools: bool = False,
+    env: dict[str, str] | None = None,
 ) -> str:
     """Generate `claude mcp add` command for Claude Code."""
     parts = ["claude mcp add zulipchat"]
@@ -360,6 +365,9 @@ def generate_claude_code_command(
 
     if bot_config:
         parts.append(f"-e ZULIP_BOT_CONFIG_FILE={bot_config['path']}")
+
+    for key, value in (env or {}).items():
+        parts.append(f"-e {key}={value}")
 
     cmd_tail = "-- uvx zulipchat-mcp"
     if extended_tools:
@@ -436,6 +444,39 @@ def _select_tool_mode() -> bool:
     return choice.strip() == "2"
 
 
+def prompt_database_backend() -> dict[str, str]:
+    """Prompt for a database backend and return the env vars to plumb into
+    the generated MCP config. Empty dict means "don't set anything" - the
+    server's own DATABASE_BACKEND default (duckdb) applies.
+    """
+    print(f"\n{BOLD}Step: Database Backend (Optional){RESET}")
+    print("  1. DuckDB (default - no setup needed)")
+    print("  2. SQLite (no extra dependency)")
+    print("  3. Postgres (for multi-replica deployments)")
+    print("  4. Skip (use the server's default)")
+    choice = prompt("Choice", default="4")
+
+    if choice == "1":
+        return {"DATABASE_BACKEND": "duckdb"}
+    if choice == "2":
+        return {"DATABASE_BACKEND": "sqlite"}
+    if choice == "3":
+        host = prompt("Postgres host")
+        port = prompt("Postgres port", default="5432")
+        dbname = prompt("Postgres database name")
+        user = prompt("Postgres user")
+        password = prompt("Postgres password")
+        return {
+            "DATABASE_BACKEND": "postgres",
+            "POSTGRES_HOST": host,
+            "POSTGRES_PORT": port,
+            "POSTGRES_DB": dbname,
+            "POSTGRES_USER": user,
+            "POSTGRES_PASSWORD": password,
+        }
+    return {}
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the setup wizard."""
     _parse_args(argv)
@@ -480,6 +521,9 @@ def main(argv: list[str] | None = None) -> None:
     # Step 4: Core vs extended
     extended_tools = _select_tool_mode()
 
+    # Optional: database backend
+    database_env = prompt_database_backend()
+
     # Step 5: Generate configuration
     print(f"\n{BOLD}Step 5: Generate Configuration{RESET}")
     print("Which MCP client are you configuring?")
@@ -502,6 +546,7 @@ def main(argv: list[str] | None = None) -> None:
         bot_config,
         extended_tools=extended_tools,
         use_uvx=True,
+        env=database_env,
     )
 
     if client_choice == "1":
@@ -511,6 +556,7 @@ def main(argv: list[str] | None = None) -> None:
                 user_config,
                 bot_config,
                 extended_tools=extended_tools,
+                env=database_env,
             )
         )
         print()
