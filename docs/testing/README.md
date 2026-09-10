@@ -36,6 +36,23 @@ real Zulip server.
 uv run pytest -q -m "not slow and not integration"
 ```
 
+## Integration tests (real Postgres)
+
+`tests/utils/test_database_backends.py` and `tests/utils/test_database.py`
+carry `integration`-marked cases that run the DatabaseManager behavioral
+suite against a real Postgres, started on demand via `testcontainers`
+(`tests/utils/conftest.py`). They need a running Docker daemon:
+
+```bash
+uv run pytest -q -m integration --no-cov
+```
+
+Locally, if Docker isn't available, the fixture skips these tests rather
+than failing the run. In CI, Docker is guaranteed on the `ubuntu-latest`
+runner, so a failed container start there raises instead of skipping -
+the dedicated `test-integration` job must never pass having run zero
+tests. Set `CI=1` locally to exercise that same fail-fast path.
+
 ## Contract-only run note
 
 Contract-only subsets can fail the global coverage gate. Use:

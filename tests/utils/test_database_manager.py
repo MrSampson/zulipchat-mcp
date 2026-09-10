@@ -1,31 +1,80 @@
-"""Tests for utils/database_manager.py."""
+"""Tests for utils/database_manager.py.
+
+TestDatabaseManagerWrapper exercises the wrapper against a real, freshly-
+migrated SqliteDatabaseManager (file-based, per-test tmp_path) rather than a
+mocked `self._db` - a mock only proves the wrapper calls execute()/upsert()
+with SQL that *looks* right; it can't catch a real constraint violation, a
+column name typo caught only at execution time, or a SQL string that's
+syntactically fine but semantically wrong (e.g. an UPDATE clause built from
+**kwargs that doesn't match what get_* actually reads back). SQLite (not
+duckdb/postgres) is enough here: this file is testing DatabaseManagerWrapper's
+own logic, which is backend-agnostic by construction (it only ever calls
+self._db's six generic methods) - the cross-backend behavior of those six
+methods themselves is what tests/utils/test_database_backends.py covers.
+"""
+
+from __future__ import annotations
 
 import re
-from unittest.mock import MagicMock, patch
+from collections.abc import Iterator
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from src.zulipchat_mcp.config import DatabaseBackend, DatabaseConfig
+from src.zulipchat_mcp.utils.database import SqliteDatabaseManager, init_database
 from src.zulipchat_mcp.utils.database_manager import DatabaseManager
+
+
+@pytest.fixture
+def manager(tmp_path: Path) -> Iterator[DatabaseManager]:
+    """A DatabaseManagerWrapper backed by a real, freshly-migrated sqlite
+    file - fresh per test via tmp_path, matching the isolation the other
+    DatabaseManager test files get from the same fixture.
+    """
+    SqliteDatabaseManager._instance = None
+    with patch("src.zulipchat_mcp.utils.database._db_manager", None):
+        init_database(
+            DatabaseConfig(
+                backend=DatabaseBackend.SQLITE, path=str(tmp_path / "test.sqlite3")
+            )
+        )
+        yield DatabaseManager()
+    SqliteDatabaseManager._instance = None
+
+
+def _make_profile(manager: DatabaseManager, agent_id: str = "agent-1") -> None:
+    manager.upsert_agent_profile(
+        agent_id=agent_id,
+        agent_name="claude",
+        agent_type="claude-code",
+        owner_email="owner@example.com",
+        stream_name="Agents-Channel",
+        topic_prefix="Agents/Session",
+    )
+
+
+def _make_session(
+    manager: DatabaseManager, session_id: str = "sess-1", agent_id: str = "agent-1"
+) -> None:
+    manager.upsert_agent_session(
+        session_id=session_id,
+        agent_id=agent_id,
+        stream_name="Agents-Channel",
+        topic_name="Agents/Session/project/claude/cc-123",
+        owner_email="owner@example.com",
+        status="active",
+    )
 
 
 class TestDatabaseManagerWrapper:
     """Tests for the high-level DatabaseManager wrapper."""
 
-    @pytest.fixture
-    def mock_db(self):
-        with patch("src.zulipchat_mcp.utils.database_manager.get_database") as mock_get:
-            db_instance = MagicMock()
-            mock_get.return_value = db_instance
-            yield db_instance
+    def test_init(self, manager: DatabaseManager) -> None:
+        assert isinstance(manager._db, SqliteDatabaseManager)
 
-    def test_init(self, mock_db):
-        manager = DatabaseManager()
-        assert manager._db == mock_db
-
-    def test_upsert_agent_profile(self, mock_db):
-        manager = DatabaseManager()
-        mock_db.query_one_as_dict.return_value = None
-
+    def test_upsert_agent_profile(self, manager: DatabaseManager) -> None:
         result = manager.upsert_agent_profile(
             agent_id="agent-1",
             agent_name="claude",
@@ -36,20 +85,40 @@ class TestDatabaseManagerWrapper:
         )
 
         assert result["status"] == "success"
-        table, columns, values, conflict_column = mock_db.upsert.call_args[0]
-        assert table == "agent_profiles"
-        assert conflict_column == "agent_id"
-        assert dict(zip(columns, values, strict=True))["agent_id"] == "agent-1"
+        stored = manager.get_agent_profile("agent-1")
+        assert stored["agent_id"] == "agent-1"
+        assert stored["agent_name"] == "claude"
 
-    def test_get_agent_profile(self, mock_db):
-        manager = DatabaseManager()
-        mock_db.query_one_as_dict.return_value = {"agent_id": "agent-1"}
+    def test_upsert_agent_profile_updates_existing_row_in_place(
+        self, manager: DatabaseManager
+    ) -> None:
+        """Same invariant test_database_backends.py's upsert test pins for
+        the raw DatabaseManager, one layer up: two upserts with the same
+        agent_id replace the row instead of erroring or duplicating.
+        """
+        _make_profile(manager)
+
+        manager.upsert_agent_profile(
+            agent_id="agent-1",
+            agent_name="claude-renamed",
+            agent_type="claude-code",
+            owner_email="owner@example.com",
+            stream_name="Agents-Channel",
+            topic_prefix="Agents/Session",
+        )
+
+        assert manager.get_agent_profile("agent-1")["agent_name"] == "claude-renamed"
+
+    def test_get_agent_profile(self, manager: DatabaseManager) -> None:
+        assert manager.get_agent_profile("does-not-exist") is None
+
+        _make_profile(manager)
+
         result = manager.get_agent_profile("agent-1")
         assert result["agent_id"] == "agent-1"
 
-    def test_upsert_agent_session(self, mock_db):
-        manager = DatabaseManager()
-        mock_db.query_one_as_dict.return_value = None
+    def test_upsert_agent_session(self, manager: DatabaseManager) -> None:
+        _make_profile(manager)
 
         result = manager.upsert_agent_session(
             session_id="sess-1",
@@ -65,19 +134,24 @@ class TestDatabaseManagerWrapper:
         )
 
         assert result["status"] == "success"
-        table, columns, values, conflict_column = mock_db.upsert.call_args[0]
-        assert table == "agent_sessions"
-        assert conflict_column == "session_id"
-        assert dict(zip(columns, values, strict=True))["session_id"] == "sess-1"
+        stored = manager.get_agent_session("sess-1")
+        assert stored["session_id"] == "sess-1"
+        assert stored["agent_id"] == "agent-1"
+        assert stored["status"] == "active"
 
-    def test_get_agent_session(self, mock_db):
-        manager = DatabaseManager()
-        mock_db.query_one_as_dict.return_value = {"session_id": "sess-1"}
+    def test_get_agent_session(self, manager: DatabaseManager) -> None:
+        assert manager.get_agent_session("does-not-exist") is None
+
+        _make_profile(manager)
+        _make_session(manager)
+
         result = manager.get_agent_session("sess-1")
         assert result["session_id"] == "sess-1"
 
-    def test_create_agent_request(self, mock_db):
-        manager = DatabaseManager()
+    def test_create_agent_request(self, manager: DatabaseManager) -> None:
+        _make_profile(manager)
+        _make_session(manager)
+
         result = manager.create_agent_request(
             request_id="req-1",
             agent_id="agent-1",
@@ -85,28 +159,71 @@ class TestDatabaseManagerWrapper:
             request_type="approval",
             prompt="Deploy now?",
         )
-        assert result["status"] == "success"
-        sql = mock_db.execute.call_args[0][0]
-        assert "INSERT INTO agent_requests" in sql
 
-    def test_get_agent_request(self, mock_db):
-        manager = DatabaseManager()
-        mock_db.query_one_as_dict.return_value = {"request_id": "req-1"}
+        assert result["status"] == "success"
+        stored = manager.get_agent_request("req-1")
+        assert stored["prompt"] == "Deploy now?"
+        assert stored["status"] == "pending"
+
+    def test_get_agent_request(self, manager: DatabaseManager) -> None:
+        assert manager.get_agent_request("does-not-exist") is None
+
+        _make_profile(manager)
+        _make_session(manager)
+        manager.create_agent_request(
+            request_id="req-1",
+            agent_id="agent-1",
+            session_id="sess-1",
+            request_type="approval",
+            prompt="Deploy now?",
+        )
+
         result = manager.get_agent_request("req-1")
         assert result["request_id"] == "req-1"
 
-    def test_update_agent_request(self, mock_db):
-        manager = DatabaseManager()
-        manager.update_agent_request("req-1", status="answered")
-        sql = mock_db.execute.call_args[0][0]
-        assert "UPDATE agent_requests" in sql
-
-    def test_create_session_event(self, mock_db):
-        manager = DatabaseManager()
-        result = manager.create_session_event(
-            event_id="evt-1",
+    def test_update_agent_request(self, manager: DatabaseManager) -> None:
+        _make_profile(manager)
+        _make_session(manager)
+        manager.create_agent_request(
+            request_id="req-1",
             agent_id="agent-1",
             session_id="sess-1",
+            request_type="approval",
+            prompt="Deploy now?",
+        )
+
+        manager.update_agent_request("req-1", status="answered")
+
+        assert manager.get_agent_request("req-1")["status"] == "answered"
+
+    def test_update_agent_request_with_no_updates_is_a_no_op(
+        self, manager: DatabaseManager
+    ) -> None:
+        """updates={} takes the early-return branch (no SET clause to
+        build); this only matters for a real backend since the mocked
+        version could never distinguish 'no-op' from 'ran a UPDATE with an
+        empty SET clause', which is a SQL syntax error.
+        """
+        _make_profile(manager)
+        _make_session(manager)
+        manager.create_agent_request(
+            request_id="req-1",
+            agent_id="agent-1",
+            session_id="sess-1",
+            request_type="approval",
+            prompt="Deploy now?",
+        )
+
+        result = manager.update_agent_request("req-1")
+
+        assert result == {"status": "success"}
+        assert manager.get_agent_request("req-1")["status"] == "pending"
+
+    def test_create_session_event(self, manager: DatabaseManager) -> None:
+        result = manager.create_session_event(
+            event_id="evt-1",
+            agent_id=None,
+            session_id=None,
             stream_name="Agents-Channel",
             topic_name="Agents/Session/project/claude/cc-123",
             sender_email="owner@example.com",
@@ -114,26 +231,59 @@ class TestDatabaseManagerWrapper:
             event_type="steer",
             content="please continue",
         )
+
         assert result["status"] == "success"
-        sql = mock_db.execute.call_args[0][0]
-        assert "INSERT INTO session_events" in sql
+        events = manager.get_unacked_session_events()
+        assert [e["id"] for e in events] == ["evt-1"]
+        assert events[0]["content"] == "please continue"
 
-    def test_get_unacked_session_events(self, mock_db):
-        manager = DatabaseManager()
-        mock_db.query_as_dicts.return_value = [{"id": "evt-1"}]
+    def test_get_unacked_session_events(self, manager: DatabaseManager) -> None:
+        assert manager.get_unacked_session_events() == []
+
+        manager.create_session_event(
+            event_id="evt-1",
+            agent_id=None,
+            session_id=None,
+            direction="inbound",
+            event_type="steer",
+            content="hello",
+        )
+
         events = manager.get_unacked_session_events(session_id="sess-1")
-        assert events == [{"id": "evt-1"}]
+        assert events == []
+        events = manager.get_unacked_session_events()
+        assert len(events) == 1
 
-    def test_ack_session_events(self, mock_db):
-        manager = DatabaseManager()
-        manager.ack_session_events(["evt-1"])
-        sql = mock_db.execute.call_args[0][0]
-        assert "UPDATE session_events SET acked = TRUE" in sql
+    def test_ack_session_events(self, manager: DatabaseManager) -> None:
+        manager.create_session_event(
+            event_id="evt-1",
+            agent_id=None,
+            session_id=None,
+            direction="inbound",
+            event_type="steer",
+            content="hello",
+        )
 
-    def test_create_agent_status(self, mock_db):
-        manager = DatabaseManager()
-        manager.create_agent_status("s1", "claude-code", "working")
-        mock_db.execute.assert_called()
+        result = manager.ack_session_events(["evt-1"])
+
+        assert result == {"status": "success"}
+        assert manager.get_unacked_session_events() == []
+
+    def test_ack_session_events_with_empty_list_is_a_no_op(
+        self, manager: DatabaseManager
+    ) -> None:
+        """ids=[] takes the early-return branch, avoiding `IN ()` - invalid
+        SQL on every backend, unlike update_agent_request's empty-SET case
+        above which is sqlite/duckdb-tolerant but still wrong on Postgres.
+        """
+        result = manager.ack_session_events([])
+
+        assert result == {"status": "success"}
+
+    def test_create_agent_status(self, manager: DatabaseManager) -> None:
+        result = manager.create_agent_status("s1", "claude-code", "working")
+
+        assert result["status"] == "success"
 
 
 def _sql_string_literals_in_source() -> list[str]:
