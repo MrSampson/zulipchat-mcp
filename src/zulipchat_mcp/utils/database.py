@@ -420,6 +420,7 @@ class PostgresDatabaseManager(DatabaseManager):
         """
         del db_path
         from sqlalchemy import create_engine
+        from sqlalchemy.engine import URL
 
         try:
             import psycopg  # noqa: F401
@@ -430,9 +431,18 @@ class PostgresDatabaseManager(DatabaseManager):
                 "(or `uv add zulipchat-mcp[postgres]`)."
             ) from exc
 
-        self._url = (
-            f"postgresql+psycopg://{self._pg_user}:{self._pg_password}"
-            f"@{self._pg_host}:{self._pg_port}/{self._pg_dbname}"
+        # URL.create(), not an f-string: naive interpolation misparses any
+        # '@', ':' or '/' in the password/user/host (a password "p@ss" makes
+        # the host "ss@db.internal"), and leaks the password into
+        # ConfigParser interpolation errors downstream. URL.create() escapes
+        # each component properly.
+        self._url = URL.create(
+            "postgresql+psycopg",
+            username=self._pg_user,
+            password=self._pg_password,
+            host=self._pg_host,
+            port=self._pg_port,
+            database=self._pg_dbname,
         )
         return create_engine(self._url)
 
@@ -470,7 +480,12 @@ class PostgresDatabaseManager(DatabaseManager):
         from .schema import metadata
 
         table_obj = metadata.tables[table]
-        row = dict(zip(columns, values, strict=True))
+        # _normalize_params(), not raw values: this statement goes straight to
+        # conn.execute() rather than through self.execute(), so it would
+        # otherwise bypass the central tzinfo stripping and let Postgres shift
+        # aware datetimes by the session TimeZone when casting into schema.py's
+        # naive `timestamp without time zone` columns.
+        row = dict(zip(columns, _normalize_params(values), strict=True))
         stmt = pg_insert(table_obj).values(**row)
         update_cols = {c: stmt.excluded[c] for c in columns if c != conflict_column}
         stmt = stmt.on_conflict_do_update(

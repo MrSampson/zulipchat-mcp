@@ -12,6 +12,7 @@ import duckdb
 import pytest
 from alembic import command
 from sqlalchemy import create_engine
+from sqlalchemy.engine import URL, make_url
 
 from src.zulipchat_mcp.utils.migrations import (
     IN_MEMORY_DB_PATH,
@@ -235,3 +236,37 @@ def test_run_postgres_migrations_builds_config_without_legacy_check(monkeypatch)
     run_postgres_migrations("postgresql+psycopg://u:p@host:5432/db")
 
     assert calls == ["head"]
+
+
+def test_run_postgres_migrations_accepts_url_object_with_percent_password(monkeypatch):
+    """Alembic's Config is a ConfigParser with BasicInterpolation: an
+    unescaped `%` in the password raised ValueError with the full URL -
+    password included - in the exception message, which server.py then
+    logged verbatim. The `%` must be escaped, and the real (unmasked)
+    password must still reach the config.
+    """
+    captured = {}
+    monkeypatch.setattr(
+        "src.zulipchat_mcp.utils.migrations.command.upgrade",
+        lambda cfg, rev: captured.update(url=cfg.get_main_option("sqlalchemy.url")),
+    )
+
+    url = URL.create(
+        "postgresql+psycopg",
+        username="mcp",
+        password="pa%ss@word",
+        host="db.internal",
+        port=5432,
+        database="zulipchat",
+    )
+
+    run_postgres_migrations(url)
+
+    # get_main_option() runs the interpolation that used to crash; the
+    # round-tripped value must be the real password, not a masked one.
+    assert "***" not in captured["url"]
+    round_tripped = make_url(captured["url"])
+    assert round_tripped.password == "pa%ss@word"
+    assert round_tripped.host == "db.internal"
+    assert round_tripped.username == "mcp"
+    assert round_tripped.database == "zulipchat"

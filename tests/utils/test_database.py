@@ -5,10 +5,12 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import DataError, OperationalError, ProgrammingError
 from sqlalchemy.pool import NullPool, QueuePool
 
@@ -773,3 +775,55 @@ class TestPostgresDatabaseManager:
         )
         assert "ON CONFLICT" in compiled
         assert "agent_profiles" in compiled
+
+    def test_upsert_strips_tzinfo_from_aware_datetimes(self):
+        """Postgres casts an aware datetime to the session TimeZone when
+        storing it into schema.py's naive `timestamp without time zone`
+        columns, silently shifting the stored value. upsert() builds its
+        statement directly (not via self.execute()), so it must apply the
+        same central _normalize_params() stripping the other backends get.
+        """
+        db = PostgresDatabaseManager(
+            host="h",
+            port=5432,
+            dbname="d",
+            user="u",
+            password="p",
+        )
+        executed = []
+        mock_conn = MagicMock()
+        mock_conn.execute.side_effect = lambda stmt: executed.append(stmt)
+        db._engine = MagicMock()
+        db._engine.begin.return_value = _mock_context_manager(mock_conn)
+
+        aware = datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)
+        db.upsert(
+            "agent_profiles",
+            ["agent_id", "created_at"],
+            ["agent-1", aware],
+            "agent_id",
+        )
+
+        params = executed[0].compile(dialect=postgresql.dialect()).params
+        stored = params["created_at"]
+        assert isinstance(stored, datetime)
+        assert stored.tzinfo is None
+        assert stored == aware.replace(tzinfo=None)
+
+    def test_make_engine_parses_password_with_at_sign_correctly(self):
+        """Naive f-string interpolation of `p@ss` into the URL reparses as
+        host='ss@db.internal', password='p' - a silent misconnection.
+        """
+        db = PostgresDatabaseManager(
+            host="db.internal",
+            port=5432,
+            dbname="zulipchat",
+            user="mcp",
+            password="p@ss:word/x",
+        )
+
+        assert db._engine.url.host == "db.internal"
+        assert db._engine.url.password == "p@ss:word/x"
+        assert db._engine.url.username == "mcp"
+        assert db._engine.url.database == "zulipchat"
+        assert db._engine.url.port == 5432

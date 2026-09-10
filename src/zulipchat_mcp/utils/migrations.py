@@ -7,6 +7,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import Connection, Engine, create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.pool import NullPool
 
 INITIAL_REVISION = "0001"
@@ -57,10 +58,22 @@ def make_sqlite_engine(db_path: str) -> Engine:
     return create_engine(sqlite_sqlalchemy_url(db_path), poolclass=NullPool)
 
 
-def _alembic_config_for_url(url: str) -> Config:
+def _alembic_config_for_url(url: str | URL) -> Config:
+    """Build an Alembic Config pointed at `url`.
+
+    Alembic's Config is a ConfigParser with BasicInterpolation, so a literal
+    `%` anywhere in the URL (commonly from a Postgres password) raises
+    ValueError - with the whole URL, password included, in the message.
+    Doubling `%` is Alembic's own documented escape and is a no-op for URLs
+    that contain none.
+
+    `render_as_string(hide_password=False)` is required for URL objects:
+    `str(url)` masks the password as `***`, which would break the connection.
+    """
     cfg = Config()
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
-    cfg.set_main_option("sqlalchemy.url", url)
+    url_str = url.render_as_string(hide_password=False) if isinstance(url, URL) else url
+    cfg.set_main_option("sqlalchemy.url", url_str.replace("%", "%%"))
     return cfg
 
 
@@ -105,7 +118,9 @@ def _needs_legacy_stamp(db_path: str) -> bool:
         engine.dispose()
 
 
-def _run_migrations_for_url(url: str, *, check_legacy_stamp_path: str | None) -> None:
+def _run_migrations_for_url(
+    url: str | URL, *, check_legacy_stamp_path: str | None
+) -> None:
     """Shared upgrade-to-head core for every backend.
 
     check_legacy_stamp_path: pass the duckdb db_path to run the DuckDB-only
@@ -144,7 +159,7 @@ def run_sqlite_migrations(db_path: str) -> None:
     )
 
 
-def run_postgres_migrations(url: str) -> None:
+def run_postgres_migrations(url: str | URL) -> None:
     """Bring the Postgres database at url up to the latest schema revision.
 
     Postgres is a new backend - there are no pre-Alembic installs to stamp,
