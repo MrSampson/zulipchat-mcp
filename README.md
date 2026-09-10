@@ -22,7 +22,7 @@
 ## Quick Start
 
 ```bash
-uvx zulipchat-mcp --zulip-config-file ~/.zuliprc
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```
 
 That's it. Your AI assistant can now read and write Zulip messages.
@@ -70,12 +70,12 @@ Why 20 instead of 60? Fewer tools means faster tool selection, lower token overh
 Need scheduled messages, event queues, file uploads, analytics, or advanced search?
 
 ```bash
-uvx zulipchat-mcp --zulip-config-file ~/.zuliprc --extended-tools
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc --extended-tools
 ```
 
 Or via environment variable:
 ```bash
-ZULIPCHAT_EXTENDED_TOOLS=1 uvx zulipchat-mcp --zulip-config-file ~/.zuliprc
+ZULIPCHAT_EXTENDED_TOOLS=1 uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```
 
 Extended mode adds: `toggle_reaction`, `cross_post_message`, `advanced_search`, `construct_narrow`, `get_scheduled_messages`, `manage_scheduled_message`, `get_drafts`, `create_draft`, `edit_draft`, `delete_draft`, `register_events`, `get_events`, `listen_events`, `upload_file`, `manage_files`, `get_daily_summary`, `manage_user_mute`, `get_user`, `get_presence`, `get_user_groups`, and more.
@@ -87,19 +87,19 @@ Full per-client setup guide: [docs/integrations/README.md](docs/integrations/REA
 ### Claude Code
 
 ```bash
-claude mcp add zulipchat -- uvx zulipchat-mcp --zulip-config-file ~/.zuliprc
+claude mcp add zulipchat -- uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc
 ```
 
 With dual identity (you + a bot):
 ```bash
-claude mcp add zulipchat -- uvx zulipchat-mcp \
+claude mcp add zulipchat -- uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp \
   --zulip-config-file ~/.zuliprc \
   --zulip-bot-config-file ~/.zuliprc-bot
 ```
 
 Optional Claude hook bridge for lifecycle and approval routing:
 ```bash
-uvx zulipchat-mcp-hook \
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp-hook \
   --zulip-config-file ~/.zuliprc \
   --zulip-bot-config-file ~/.zuliprc-bot
 ```
@@ -122,7 +122,7 @@ Add to `~/.gemini/settings.json` under `mcpServers`:
 {
   "zulipchat": {
     "command": "uvx",
-    "args": ["zulipchat-mcp", "--zulip-config-file", "/path/to/.zuliprc"]
+    "args": ["--from", "zulipchat-mcp[duckdb]", "zulipchat-mcp", "--zulip-config-file", "/path/to/.zuliprc"]
   }
 }
 ```
@@ -136,7 +136,7 @@ Add to your MCP configuration:
   "mcpServers": {
     "zulipchat": {
       "command": "uvx",
-      "args": ["zulipchat-mcp", "--zulip-config-file", "/path/to/.zuliprc"]
+      "args": ["--from", "zulipchat-mcp[duckdb]", "zulipchat-mcp", "--zulip-config-file", "/path/to/.zuliprc"]
     }
   }
 }
@@ -179,7 +179,7 @@ pip install zulipchat-mcp[postgres]   # or: uv add zulipchat-mcp[postgres]
 
 `sqlite` needs no extra — it's covered by Python's standard library.
 
-> **Upgrading from an older version?** `DATABASE_BACKEND` still defaults to `duckdb`, but `duckdb`/`duckdb-engine` are no longer bundled with the base install. If you don't add the `duckdb` extra, the server fails fast at startup with an error naming the missing extra and the install command to fix it — it will not silently fall back to a different backend.
+> **Upgrading from an older version?** `DATABASE_BACKEND` still defaults to `duckdb`, but `duckdb`/`duckdb-engine` are no longer bundled with the base install. If you don't add the `duckdb` extra, the server logs an actionable startup warning naming the missing extra and the install command to fix it, then continues running with the agent/database-backed features disabled — it will not silently fall back to a different backend.
 
 ### Remote HTTP Transport
 
@@ -188,7 +188,7 @@ ZulipChat MCP supports stateless HTTP deployments under the MCP 2026-07-28 proto
 ```bash
 # Run server over HTTP with bearer authentication
 ZULIPCHAT_HTTP_AUTH_TOKEN=your-secret-token \
-  uvx zulipchat-mcp --zulip-config-file ~/.zuliprc --transport http --host 0.0.0.0 --port 8000
+  uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc --transport http --host 0.0.0.0 --port 8000
 ```
 
 Generate client integration snippets for remote HTTP connections:
@@ -225,7 +225,7 @@ Dedicated setup pages:
 Configure both a user and a bot zuliprc to let your assistant switch between identities mid-session:
 
 ```bash
-uvx zulipchat-mcp \
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp \
   --zulip-config-file ~/.zuliprc \
   --zulip-bot-config-file ~/.zuliprc-bot
 ```

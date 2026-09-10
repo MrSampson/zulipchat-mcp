@@ -4,6 +4,13 @@ All notable changes to ZulipChat MCP are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Pluggable database backend (`DATABASE_BACKEND`)**: agent state persistence now selects its backend with `DATABASE_BACKEND=duckdb|sqlite|postgres`. The default is unchanged (`duckdb`). `sqlite` needs no extra dependency; `postgres` is configured with `POSTGRES_HOST`, `POSTGRES_PORT` (default `5432`), `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`, and is the option for multi-writer/multi-replica HTTP deployments. `ZULIPCHAT_DB_PATH` continues to set the file path for the two file-based backends. An unrecognized `DATABASE_BACKEND`, or a `postgres` backend missing `POSTGRES_HOST`/`POSTGRES_DB`/`POSTGRES_USER`, is rejected at startup instead of failing later with an opaque connection error.
+- **`[postgres]` extra**: `pip install zulipchat-mcp[postgres]` (or `uv add zulipchat-mcp[postgres]`) installs the `psycopg` driver needed by the `postgres` backend.
+
+### Breaking Changes & Migration
+- **`duckdb` and `duckdb-engine` are no longer hard dependencies.** They moved into an optional `[duckdb]` extra so installs that use `sqlite` or `postgres` don't pull in an unused database engine. Existing users on the default backend must add the extra when upgrading: `pip install zulipchat-mcp[duckdb]` (or `uv add zulipchat-mcp[duckdb]`, or `uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp`). Without it the server logs an actionable startup warning naming the missing extra and the install command, then continues running with agent/database-backed features disabled — it never silently falls back to a different backend.
+
 ## [0.7.3-beta.1] (2026-08-09)
 
 ### Fixed

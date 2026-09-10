@@ -43,7 +43,7 @@ In the 2026-07-28 stateless protocol (FastMCP 4+), MCP sampling was removed from
 ### Stateless HTTP Transport
 - `--transport http` serves on streamable-HTTP (port 8000 by default).
 - Authentication: Set `--auth-token` or `ZULIPCHAT_HTTP_AUTH_TOKEN` (Bearer token auth). Required when binding beyond `127.0.0.1`.
-- **Multi-replica note**: DuckDB persistence is single-writer. In multi-replica HTTP deployments, ensure each replica points to a distinct DuckDB path or use stdio/single-instance mode.
+- **Multi-replica note**: the default DuckDB/SQLite backends are single-writer file databases. When deploying multiple HTTP replicas, either point each instance at a distinct file, run a single-instance deployment, or set `DATABASE_BACKEND=postgres` (install with the `postgres` extra) for a real multi-writer backend.
 
 ### Bidirectional Agent Communication (v0.4+)
 Full agent-to-user messaging pipeline available in `src/zulipchat_mcp/tools/agents.py`:

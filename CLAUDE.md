@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Published**: [PyPI](https://pypi.org/project/zulipchat-mcp/) | [TestPyPI](https://test.pypi.org/project/zulipchat-mcp/)
 
-Install: `uvx zulipchat-mcp --zulip-config-file ~/.zuliprc`
+Install: `uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc`
 
 ## Project Overview
 
@@ -23,7 +23,7 @@ uv sync
 uv run zulipchat-mcp --zulip-config-file ~/.zuliprc
 
 # Quick run via uvx
-uvx zulipchat-mcp
+uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp
 ```
 
 ### Testing & Quality Assurance
@@ -166,13 +166,13 @@ ZULIP_BOT_API_KEY=bot_api_key              # Optional
 For Claude Code integration (tested syntax):
 ```bash
 # From PyPI (once published)
-claude mcp add zulipchat -e ZULIP_EMAIL=bot@your-org.zulipchat.com -e ZULIP_API_KEY=your-api-key -e ZULIP_SITE=https://your-org.zulipchat.com -- uvx zulipchat-mcp
+claude mcp add zulipchat -e ZULIP_EMAIL=bot@your-org.zulipchat.com -e ZULIP_API_KEY=your-api-key -e ZULIP_SITE=https://your-org.zulipchat.com -- uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp
 
 # From GitHub (available now)
-claude mcp add zulipchat -e ZULIP_EMAIL=bot@your-org.zulipchat.com -e ZULIP_API_KEY=your-api-key -e ZULIP_SITE=https://your-org.zulipchat.com -- uvx --from git+https://github.com/akougkas/zulipchat-mcp.git zulipchat-mcp
+claude mcp add zulipchat -e ZULIP_EMAIL=bot@your-org.zulipchat.com -e ZULIP_API_KEY=your-api-key -e ZULIP_SITE=https://your-org.zulipchat.com -- uvx --from 'zulipchat-mcp[duckdb] @ git+https://github.com/akougkas/zulipchat-mcp.git' zulipchat-mcp
 
 # From TestPyPI (for testing)
-claude mcp add zulipchat -e ZULIP_EMAIL=bot@your-org.zulipchat.com -e ZULIP_API_KEY=your-api-key -e ZULIP_SITE=https://your-org.zulipchat.com -- uvx --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ zulipchat-mcp
+claude mcp add zulipchat -e ZULIP_EMAIL=bot@your-org.zulipchat.com -e ZULIP_API_KEY=your-api-key -e ZULIP_SITE=https://your-org.zulipchat.com -- uvx --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ --from 'zulipchat-mcp[duckdb]' zulipchat-mcp
 ```
 
 **Important**: Use the `--` separator to properly pass uvx arguments to Claude Code. Environment variables must come before the `--` separator.
