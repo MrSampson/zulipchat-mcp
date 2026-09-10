@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import pytest
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DataError, OperationalError, ProgrammingError
 from sqlalchemy.pool import NullPool, QueuePool
 
@@ -827,3 +828,42 @@ class TestPostgresDatabaseManager:
         assert db._engine.url.username == "mcp"
         assert db._engine.url.database == "zulipchat"
         assert db._engine.url.port == 5432
+
+
+def test_postgres_manager_to_alembic_url_survives_special_characters(monkeypatch):
+    """End-to-end across the database.py -> migrations.py seam that both
+    critical URL bugs lived on: a password containing '@', ':', '/' and '%'
+    must reach both the engine and the Alembic config intact, without
+    raising, and must never appear in db_path (which DatabaseLockedError
+    messages and logs surface verbatim).
+    """
+    from src.zulipchat_mcp.utils import migrations
+
+    PostgresDatabaseManager._instance = None
+    password = "p@ss%wo/rd:x"
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(
+        migrations.command,
+        "upgrade",
+        lambda cfg, rev: captured.update(url=cfg.get_main_option("sqlalchemy.url")),
+    )
+
+    try:
+        db = PostgresDatabaseManager(
+            host="db.internal",
+            port=5432,
+            dbname="zulipchat",
+            user="mcp",
+            password=password,
+        )
+
+        assert db._engine.url.host == "db.internal"
+        assert db._engine.url.password == password
+        assert password not in db.db_path
+
+        alembic_url = make_url(captured["url"])
+        assert alembic_url.host == "db.internal"
+        assert alembic_url.password == password
+        assert alembic_url.database == "zulipchat"
+    finally:
+        PostgresDatabaseManager._instance = None
