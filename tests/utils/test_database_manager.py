@@ -35,8 +35,10 @@ class TestDatabaseManagerWrapper:
         )
 
         assert result["status"] == "success"
-        sql = mock_db.execute.call_args[0][0]
-        assert "INSERT OR REPLACE INTO agent_profiles" in sql
+        table, columns, values, conflict_column = mock_db.upsert.call_args[0]
+        assert table == "agent_profiles"
+        assert conflict_column == "agent_id"
+        assert dict(zip(columns, values, strict=True))["agent_id"] == "agent-1"
 
     def test_get_agent_profile(self, mock_db):
         manager = DatabaseManager()
@@ -62,8 +64,10 @@ class TestDatabaseManagerWrapper:
         )
 
         assert result["status"] == "success"
-        sql = mock_db.execute.call_args[0][0]
-        assert "INSERT OR REPLACE INTO agent_sessions" in sql
+        table, columns, values, conflict_column = mock_db.upsert.call_args[0]
+        assert table == "agent_sessions"
+        assert conflict_column == "session_id"
+        assert dict(zip(columns, values, strict=True))["session_id"] == "sess-1"
 
     def test_get_agent_session(self, mock_db):
         manager = DatabaseManager()
