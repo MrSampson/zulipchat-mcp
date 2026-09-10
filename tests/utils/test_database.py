@@ -1,6 +1,7 @@
 """Tests for utils/database.py - short-lived connection pattern."""
 
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -14,6 +15,7 @@ from sqlalchemy.pool import NullPool
 from src.zulipchat_mcp.utils.database import (
     DatabaseLockedError,
     DuckDBDatabaseManager,
+    SqliteDatabaseManager,
     get_database,
     init_database,
 )
@@ -583,3 +585,56 @@ class TestDatabaseManager:
 
         rows = db.query("SELECT id, name FROM upsert_t")
         assert rows == [(1, "updated-name")]
+
+
+class TestSqliteDatabaseManager:
+    """Tests for SqliteDatabaseManager - mirrors TestDuckDBDatabaseManager's
+    backend-agnostic behavior. Lock-retry and stale-lock-PID tests stay
+    DuckDB-only (sqlite's "database is locked" error carries no PID).
+    """
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        SqliteDatabaseManager._instance = None
+        with patch("src.zulipchat_mcp.utils.database._db_manager", None):
+            yield
+        SqliteDatabaseManager._instance = None
+
+    def test_init_success(self, tmp_path):
+        db_path = str(tmp_path / "test.sqlite3")
+        db = SqliteDatabaseManager(db_path)
+
+        assert db._initialized is True
+        assert db.db_path == db_path
+        assert isinstance(db._engine.pool, NullPool)
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+        finally:
+            conn.close()
+        assert row == ("0001",)
+
+    def test_execute_creates_row(self, tmp_path):
+        db = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
+        db.execute("CREATE TABLE t (x INTEGER)")
+
+        db.execute("INSERT INTO t VALUES (?)", [1])
+
+        assert db.query("SELECT x FROM t") == [(1,)]
+
+    def test_executemany_inserts_all_rows(self, tmp_path):
+        db = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
+        db.execute("CREATE TABLE t (x INTEGER)")
+
+        db.executemany("INSERT INTO t VALUES (?)", [(1,), (2,)])
+
+        assert db.query("SELECT x FROM t ORDER BY x") == [(1,), (2,)]
+
+    def test_query_as_dicts_returns_list_of_dicts(self, tmp_path):
+        db = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
+        db.execute("CREATE TABLE t (id INTEGER, name VARCHAR)")
+        db.executemany("INSERT INTO t VALUES (?, ?)", [(1, "a"), (2, "b")])
+
+        result = db.query_as_dicts("SELECT id, name FROM t ORDER BY id")
+
+        assert result == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]

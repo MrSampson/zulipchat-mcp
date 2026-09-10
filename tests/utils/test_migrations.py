@@ -5,6 +5,7 @@ brand new database file, and one already created by the old hand-rolled
 `schema_migrations`-table migrator that predates Alembic.
 """
 
+import sqlite3
 from pathlib import Path
 
 import duckdb
@@ -16,6 +17,7 @@ from src.zulipchat_mcp.utils.migrations import (
     IN_MEMORY_DB_PATH,
     _alembic_config,
     run_migrations,
+    run_sqlite_migrations,
 )
 from src.zulipchat_mcp.utils.schema import metadata
 
@@ -153,3 +155,58 @@ def test_downgrade_from_head_drops_every_real_table(tmp_path: Path) -> None:
     command.downgrade(_alembic_config(db_path), "base")
 
     assert _table_names(db_path).isdisjoint(_REAL_TABLE_NAMES)
+
+
+def _sqlite_table_names(db_path: str) -> set[str]:
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+        return {r[0] for r in rows}
+    finally:
+        conn.close()
+
+
+def _sqlite_alembic_version(db_path: str) -> str | None:
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
+def test_sqlite_fresh_database_creates_all_real_tables(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "fresh.sqlite3")
+
+    run_sqlite_migrations(db_path)
+
+    assert _sqlite_table_names(db_path) >= _REAL_TABLE_NAMES
+
+
+def test_sqlite_fresh_database_ends_up_at_the_initial_revision(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "fresh.sqlite3")
+
+    run_sqlite_migrations(db_path)
+
+    assert _sqlite_alembic_version(db_path) == "0001"
+
+
+def test_sqlite_in_memory_database_does_not_leak_a_literal_memory_file_to_disk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    run_sqlite_migrations(IN_MEMORY_DB_PATH)
+
+    assert not (tmp_path / IN_MEMORY_DB_PATH).exists()
+
+
+def test_sqlite_running_twice_on_the_same_database_does_not_raise(tmp_path: Path) -> None:
+    db_path = str(tmp_path / "fresh.sqlite3")
+
+    run_sqlite_migrations(db_path)
+    run_sqlite_migrations(db_path)
+
+    assert _sqlite_table_names(db_path) >= _REAL_TABLE_NAMES

@@ -353,6 +353,34 @@ class DuckDBDatabaseManager(DatabaseManager):
         self.execute(_insert_or_replace_sql(table, columns), tuple(values))
 
 
+class SqliteDatabaseManager(DatabaseManager):
+    """SQLite-backed persistence manager. Needs no extra package - stdlib
+    sqlite3 + SQLAlchemy's built-in dialect. Same short-lived-connection
+    (NullPool) and generic lock-retry behavior as DuckDB; no PID parsing
+    since sqlite's lock error carries no PID.
+    """
+
+    def _make_engine(self, db_path: str) -> Engine:
+        from .migrations import make_sqlite_engine
+
+        return make_sqlite_engine(db_path)
+
+    def _run_migrations(self) -> None:
+        from .migrations import run_sqlite_migrations
+
+        run_sqlite_migrations(self.db_path)
+
+    def upsert(
+        self,
+        table: str,
+        columns: Sequence[str],
+        values: Sequence[Any],
+        conflict_column: str,
+    ) -> None:
+        del conflict_column  # see DuckDBDatabaseManager.upsert
+        self.execute(_insert_or_replace_sql(table, columns), tuple(values))
+
+
 def _insert_or_replace_sql(table: str, columns: Sequence[str]) -> str:
     """Shared by DuckDBDatabaseManager and SqliteDatabaseManager - both
     support SQLite's INSERT OR REPLACE INTO syntax natively.
