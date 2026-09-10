@@ -156,6 +156,31 @@ Add to your MCP configuration:
 | `--unsafe` | Enable administrative tools (use with caution) |
 | `--debug` | Enable debug logging |
 
+### Database Backend
+
+Agent state (sessions, scheduled tasks, message history for analytics, etc.) persists through a pluggable backend, selected with `DATABASE_BACKEND`:
+
+| Variable | Description |
+|----------|-------------|
+| `DATABASE_BACKEND` | `duckdb` (default) \| `sqlite` \| `postgres` |
+| `ZULIPCHAT_DB_PATH` | File path for the `duckdb`/`sqlite` backends (default: `.mcp/zulipchat/zulipchat.duckdb` or `.mcp/zulipchat/zulipchat.sqlite3`, respectively) |
+| `POSTGRES_HOST` | Postgres host (`postgres` backend only) |
+| `POSTGRES_PORT` | Postgres port (default: `5432`) |
+| `POSTGRES_DB` | Postgres database name |
+| `POSTGRES_USER` | Postgres user |
+| `POSTGRES_PASSWORD` | Postgres password |
+
+`duckdb` and `postgres` support ship as optional extras rather than default dependencies, so install the one matching your backend:
+
+```bash
+pip install zulipchat-mcp[duckdb]     # or: uv add zulipchat-mcp[duckdb]
+pip install zulipchat-mcp[postgres]   # or: uv add zulipchat-mcp[postgres]
+```
+
+`sqlite` needs no extra — it's covered by Python's standard library.
+
+> **Upgrading from an older version?** `DATABASE_BACKEND` still defaults to `duckdb`, but `duckdb`/`duckdb-engine` are no longer bundled with the base install. If you don't add the `duckdb` extra, the server fails fast at startup with an error naming the missing extra and the install command to fix it — it will not silently fall back to a different backend.
+
 ### Remote HTTP Transport
 
 ZulipChat MCP supports stateless HTTP deployments under the MCP 2026-07-28 protocol:
@@ -172,7 +197,7 @@ Generate client integration snippets for remote HTTP connections:
 uvx zulipchat-mcp-integrate print --client claude-code --remote-url http://mcp.internal:8000/mcp --remote-token your-secret-token
 ```
 
-> **Note on Multi-Replica Deployments**: DuckDB state persistence is single-writer. When deploying multiple HTTP replicas, ensure each instance points to a distinct DuckDB path or run a single-instance deployment.
+> **Note on Multi-Replica Deployments**: the default DuckDB/SQLite backends are single-writer file databases. When deploying multiple HTTP replicas, either point each instance at a distinct file, run a single-instance deployment, or set `DATABASE_BACKEND=postgres` (install with the `postgres` extra) for a real multi-writer backend.
 
 ### AI Analytics & LLM Provider
 
@@ -256,11 +281,11 @@ src/zulipchat_mcp/
 ├── core/           # Client wrapper, identity, caching, security
 ├── tools/          # MCP tool implementations (two-tier registration)
 ├── services/       # Background listener and session event routing
-├── utils/          # Logging, DuckDB persistence, metrics
+├── utils/          # Logging, pluggable persistence (SQLite/DuckDB/Postgres), metrics
 └── config.py       # config loading (zuliprc + environment fallback)
 ```
 
-Built on [FastMCP](https://github.com/PrefectHQ/fastmcp) with async-first design, [DuckDB](https://duckdb.org) for agent state persistence, and smart user/stream caching for fast fuzzy resolution.
+Built on [FastMCP](https://github.com/PrefectHQ/fastmcp) with async-first design, a pluggable persistence backend (SQLite, [DuckDB](https://duckdb.org), or Postgres via `DATABASE_BACKEND`) for agent state, and smart user/stream caching for fast fuzzy resolution.
 
 ## Privacy
 

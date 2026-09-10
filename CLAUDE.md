@@ -10,7 +10,7 @@ Install: `uvx zulipchat-mcp --zulip-config-file ~/.zuliprc`
 
 ## Project Overview
 
-ZulipChat MCP Server v0.7.3-beta.1 is a Model Context Protocol (MCP) server that enables AI assistants to interact with Zulip Chat workspaces. The project uses FastMCP framework with DuckDB for persistence and async-first architecture.
+ZulipChat MCP Server v0.7.3-beta.1 is a Model Context Protocol (MCP) server that enables AI assistants to interact with Zulip Chat workspaces. The project uses FastMCP framework with a pluggable persistence backend (SQLite, DuckDB, or Postgres, selected via `DATABASE_BACKEND`; DuckDB remains the default) and async-first architecture.
 
 ## Essential Development Commands
 
@@ -65,7 +65,7 @@ src/zulipchat_mcp/
 ├── core/           # Business logic (client, identity, commands, batch processing)
 ├── tools/          # MCP tool implementations (messaging, streams, search, events, users, files)
 ├── utils/          # Shared utilities (logging, database, migrations, health, metrics)
-├── migrations/     # Alembic environment + revision scripts for the DuckDB schema
+├── migrations/     # Alembic environment + revision scripts for the schema (run against SQLite/DuckDB/Postgres, see below)
 ├── services/       # Background services (scheduler, message listener)
 ├── integrations/   # AI client integrations
 └── config.py       # Configuration management
@@ -77,7 +77,7 @@ src/zulipchat_mcp/
 - **Client Wrapper**: `src/zulipchat_mcp/core/client.py` - Dual identity Zulip API wrapper with caching
 - **Tools**: `src/zulipchat_mcp/tools/*.py` - MCP tool implementations
 - **Configuration**: `src/zulipchat_mcp/config.py` - Environment/CLI configuration management
-- **Database**: DuckDB integration for persistence and caching, schema managed via Alembic (see [Database Migrations](#database-migrations))
+- **Database**: pluggable persistence backend (SQLite/DuckDB/Postgres, selected via `DATABASE_BACKEND`; DuckDB remains the default) for state and caching, schema managed via Alembic across all three backends (see [Database Migrations](#database-migrations))
 
 ### Dual Identity System
 The client supports both user and bot credentials:
@@ -232,7 +232,7 @@ execute_chain([
 
 ## Database Migrations
 
-Schema changes go through Alembic, seeded from the canonical schema in `src/zulipchat_mcp/utils/schema.py` (SQLAlchemy Core `Table` objects - the source of truth). `DatabaseManager.__init__` runs migrations automatically via `utils/migrations.py::run_migrations()`; there is no separate CLI step for the running server.
+Schema changes go through Alembic, seeded from the canonical schema in `src/zulipchat_mcp/utils/schema.py` (SQLAlchemy Core `Table` objects - the source of truth). `DatabaseManager.__init__` runs migrations automatically; there is no separate CLI step for the running server. The same set of Alembic revisions runs against all three backends - `utils/migrations.py::run_migrations()` for DuckDB, `run_sqlite_migrations()` for SQLite, and `run_postgres_migrations()` for Postgres - so a new revision (below) must stay backend-agnostic rather than assuming DuckDB.
 
 **To add a migration**: change the `Table` definitions in `utils/schema.py` first, then hand-write a new revision under `src/zulipchat_mcp/migrations/versions/` (`down_revision` pointing at the current head) with static `op.create_table()`/`op.add_column()`/etc. calls matching the change. `alembic revision -m "..."` (empty scaffold) works for the boilerplate; `alembic upgrade head --sql` (offline mode) is a good way to see the exact DDL to transcribe. `alembic revision --autogenerate` does not work - `duckdb_engine` 0.17.0's reflection support reuses Postgres's `pg_catalog` queries wholesale and crashes against DuckDB (see `alembic.ini`). `DatabaseManager`'s regular `execute`/`query` methods also go through SQLAlchemy/`duckdb_engine` now (a `NullPool`-backed `Engine`, so every call still opens and closes its own short-lived connection - see `utils/database.py`), not raw `duckdb.connect()`.
 
