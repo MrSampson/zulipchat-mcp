@@ -276,7 +276,29 @@ class DatabaseManager(ABC):
         pass
 
 
-class DuckDBDatabaseManager(DatabaseManager):
+class _QmarkFileBackend(DatabaseManager):
+    """Shared by DuckDBDatabaseManager and SqliteDatabaseManager: both are
+    qmark-paramstyle, file-based backends that support SQLite's native
+    INSERT OR REPLACE INTO syntax (DuckDB copied SQLite's syntax here).
+    Neither needs a _translate_sql override (qmark is already correct).
+    """
+
+    def upsert(
+        self,
+        table: str,
+        columns: Sequence[str],
+        values: Sequence[Any],
+        conflict_column: str,
+    ) -> None:
+        # conflict_column is unused: INSERT OR REPLACE's conflict target is
+        # implicitly the table's primary key, which is already conflict_column
+        # for every caller today. Kept in the signature for parity with
+        # PostgresDatabaseManager.upsert(), which needs it explicitly.
+        del conflict_column
+        self.execute(_insert_or_replace_sql(table, columns), tuple(values))
+
+
+class DuckDBDatabaseManager(_QmarkFileBackend):
     """DuckDB-backed persistence manager.
 
     Uses short-lived connections for write operations to support concurrent
@@ -340,22 +362,8 @@ class DuckDBDatabaseManager(DatabaseManager):
             logger.info(f"Locking process (PID {pid}) is dead; retrying connect")
         return True
 
-    def upsert(
-        self,
-        table: str,
-        columns: Sequence[str],
-        values: Sequence[Any],
-        conflict_column: str,
-    ) -> None:
-        # conflict_column is unused: INSERT OR REPLACE's conflict target is
-        # implicitly the table's primary key, which is already conflict_column
-        # for every caller today. Kept in the signature for parity with
-        # PostgresDatabaseManager.upsert(), which needs it explicitly.
-        del conflict_column
-        self.execute(_insert_or_replace_sql(table, columns), tuple(values))
 
-
-class SqliteDatabaseManager(DatabaseManager):
+class SqliteDatabaseManager(_QmarkFileBackend):
     """SQLite-backed persistence manager. Needs no extra package - stdlib
     sqlite3 + SQLAlchemy's built-in dialect. Same short-lived-connection
     (NullPool) and generic lock-retry behavior as DuckDB; no PID parsing
@@ -372,16 +380,6 @@ class SqliteDatabaseManager(DatabaseManager):
 
         run_sqlite_migrations(self.db_path)
 
-    def upsert(
-        self,
-        table: str,
-        columns: Sequence[str],
-        values: Sequence[Any],
-        conflict_column: str,
-    ) -> None:
-        del conflict_column  # see DuckDBDatabaseManager.upsert
-        self.execute(_insert_or_replace_sql(table, columns), tuple(values))
-
 
 class PostgresDatabaseManager(DatabaseManager):
     """Postgres-backed persistence manager. Multi-writer, so no file-lock
@@ -396,31 +394,44 @@ class PostgresDatabaseManager(DatabaseManager):
         dbname: str | None,
         user: str | None,
         password: str | None,
-        max_retries: int = 5,
-        retry_delay: float = 0.1,
     ) -> None:
         # Stashed before calling super().__init__(): the base class's
         # __init__ immediately calls self._make_engine(db_path), and
-        # _make_engine below reads these instead of its db_path argument
-        # (which is only a redacted display string, never real connection
-        # info - see _make_engine's docstring).
-        self._pg_host = host
-        self._pg_port = port
-        self._pg_dbname = dbname
-        self._pg_user = user
-        self._pg_password = password
+        # _make_engine below reads self._url instead of its db_path
+        # argument (which is only a redacted display string, never real
+        # connection info - see the display comment below).
+        #
+        # URL.create(), not an f-string: naive interpolation misparses any
+        # '@', ':' or '/' in the password/user/host (a password "p@ss" makes
+        # the host "ss@db.internal"), and leaks the password into
+        # ConfigParser interpolation errors downstream. URL.create() escapes
+        # each component properly.
+        from sqlalchemy.engine import URL
+
+        self._url = URL.create(
+            "postgresql+psycopg",
+            username=user,
+            password=password,
+            host=host,
+            port=port,
+            database=dbname,
+        )
+        # Redacted display string - password must never end up in
+        # self.db_path, which DatabaseLockedError messages and logs may
+        # surface verbatim. max_retries/retry_delay are the base class's
+        # positional defaults: Postgres overrides _with_lock_retry to a
+        # no-op passthrough below, so it never reads either attribute -
+        # there's no caller-facing knob to accept and forward here.
         display = f"postgresql://{user}@{host}:{port}/{dbname}"
-        super().__init__(display, max_retries, retry_delay)
+        super().__init__(display, 5, 0.1)
 
     def _make_engine(self, db_path: str) -> Engine:
         """Ignores db_path (a redacted display string, never the real
-        connection info - password must never end up in self.db_path,
-        which DatabaseLockedError messages and logs may surface verbatim).
-        Builds the real URL from the fields __init__ stashed on self.
+        connection info). Builds the engine from self._url, which __init__
+        already constructed.
         """
         del db_path
         from sqlalchemy import create_engine
-        from sqlalchemy.engine import URL
 
         try:
             import psycopg  # noqa: F401
@@ -431,19 +442,6 @@ class PostgresDatabaseManager(DatabaseManager):
                 "(or `uv add zulipchat-mcp[postgres]`)."
             ) from exc
 
-        # URL.create(), not an f-string: naive interpolation misparses any
-        # '@', ':' or '/' in the password/user/host (a password "p@ss" makes
-        # the host "ss@db.internal"), and leaks the password into
-        # ConfigParser interpolation errors downstream. URL.create() escapes
-        # each component properly.
-        self._url = URL.create(
-            "postgresql+psycopg",
-            username=self._pg_user,
-            password=self._pg_password,
-            host=self._pg_host,
-            port=self._pg_port,
-            database=self._pg_dbname,
-        )
         return create_engine(self._url)
 
     def _run_migrations(self) -> None:
@@ -530,7 +528,12 @@ def init_database(config: DatabaseConfig) -> DatabaseManager:
     """Initialize the global database manager for the given backend config.
 
     Must be called once at server startup (mirrors init_config_manager()).
-    Subsequent calls reinitialize (useful for testing).
+    A backend class is a per-process singleton (see DatabaseManager.__new__),
+    so a second call with a different config for the same backend does NOT
+    reinitialize it - it silently returns the already-constructed instance,
+    still pointed at the first config. Tests that need a fresh instance must
+    reset that backend class's `_instance` to None first (see this module's
+    test suite for the pattern).
     """
     global _db_manager
     backend = config.backend

@@ -1,5 +1,6 @@
 """Tests for utils/database_manager.py."""
 
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -133,3 +134,48 @@ class TestDatabaseManagerWrapper:
         manager = DatabaseManager()
         manager.create_agent_status("s1", "claude-code", "working")
         mock_db.execute.assert_called()
+
+
+def _sql_string_literals_in_source() -> list[str]:
+    """Every string literal in database_manager.py that looks like a SQL
+    statement (contains a DML keyword), found by parsing the module's own
+    source with ast rather than importing it - this only needs the text of
+    the literals, not the running module.
+    """
+    import ast
+    import inspect
+
+    from src.zulipchat_mcp.utils import database_manager
+
+    source = inspect.getsource(database_manager)
+    tree = ast.parse(source)
+    keywords = ("SELECT", "INSERT", "UPDATE", "DELETE")
+    literals = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if any(kw in node.value for kw in keywords):
+                literals.append(node.value)
+    return literals
+
+
+def test_no_sql_literal_contains_a_bare_percent_or_a_quoted_question_mark():
+    """PostgresDatabaseManager._translate_sql() does a blanket
+    sql.replace("?", "%s") on every SQL string in this file, since they're
+    all written with duckdb/sqlite's native `?` qmark placeholders (see
+    database.py). That textual replace is not SQL-aware: a literal `%` in
+    the SQL text (not a bound parameter) would corrupt psycopg's pyformat
+    parsing, and a literal `?` inside a quoted string value (e.g. a
+    "'unknown?'" default) would be wrongly translated into "%s" too. This
+    test pins the invariant _translate_sql's docstring already documents as
+    manually verified, so a future SQL string that breaks it fails loudly
+    here instead of only against a real Postgres connection.
+    """
+    literals = _sql_string_literals_in_source()
+    assert literals, "expected to find at least one SQL literal to check"
+
+    for sql in literals:
+        assert "%" not in sql, f"bare '%' in SQL literal breaks psycopg: {sql!r}"
+        # Any single-quoted string *value* embedded in the SQL text itself
+        # (not a bound parameter) that contains '?' would be mistranslated.
+        for quoted in re.findall(r"'[^']*'", sql):
+            assert "?" not in quoted, f"'?' inside a quoted SQL literal: {sql!r}"

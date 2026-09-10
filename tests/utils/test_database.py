@@ -648,6 +648,42 @@ class TestSqliteDatabaseManager:
 
         assert result == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
 
+    def test_upsert_replaces_row_with_same_conflict_column_instead_of_duplicating(
+        self, tmp_path
+    ):
+        db = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
+        db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name VARCHAR)")
+
+        db.upsert("t", ["id", "name"], [1, "original-name"], "id")
+        db.upsert("t", ["id", "name"], [1, "updated-name"], "id")
+
+        assert db.query("SELECT id, name FROM t") == [(1, "updated-name")]
+
+    def test_try_clear_stale_lock_uses_base_class_default_of_false(self, tmp_path):
+        """SqliteDatabaseManager doesn't override _try_clear_stale_lock (no
+        PID in sqlite's lock error to parse) - it relies on the base
+        class's default, which must always decline rather than silently
+        skip the retry-with-backoff path.
+        """
+        db = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
+
+        assert db._try_clear_stale_lock(Exception("database is locked")) is False
+
+    def test_init_database_dispatches_to_sqlite_manager(self):
+        """init_database() is the sole production entry point for every
+        backend - it must actually map DatabaseConfig.backend=SQLITE onto
+        SqliteDatabaseManager, not just SqliteDatabaseManager's direct
+        constructor (which every other test in this class uses).
+        """
+        from src.zulipchat_mcp.config import DatabaseBackend, DatabaseConfig
+
+        db = init_database(
+            DatabaseConfig(backend=DatabaseBackend.SQLITE, path=IN_MEMORY_DB_PATH)
+        )
+
+        assert isinstance(db, SqliteDatabaseManager)
+        assert get_database() is db
+
 
 class TestPostgresDatabaseManager:
     """Unit tests only - no real Postgres connection. Engine construction
@@ -699,6 +735,38 @@ class TestPostgresDatabaseManager:
         )
 
         assert "s3cret" not in db.db_path
+
+    def test_init_database_dispatches_to_postgres_manager_with_correct_field_mapping(
+        self,
+    ):
+        """init_database() is the sole production entry point for every
+        backend, and it renames DatabaseConfig's postgres_* fields onto
+        PostgresDatabaseManager's host/port/dbname/user/password
+        constructor kwargs - a transposed keyword here (e.g. postgres_db
+        landing on `user` instead of `dbname`) would ship green in every
+        other test in this class, which all construct
+        PostgresDatabaseManager directly with already-correct kwargs.
+        """
+        from src.zulipchat_mcp.config import DatabaseBackend, DatabaseConfig
+
+        db = init_database(
+            DatabaseConfig(
+                backend=DatabaseBackend.POSTGRES,
+                postgres_host="db.internal",
+                postgres_port=6543,
+                postgres_db="zulipchat",
+                postgres_user="mcp",
+                postgres_password="s3cret",
+            )
+        )
+
+        assert isinstance(db, PostgresDatabaseManager)
+        assert get_database() is db
+        assert db._engine.url.host == "db.internal"
+        assert db._engine.url.port == 6543
+        assert db._engine.url.database == "zulipchat"
+        assert db._engine.url.username == "mcp"
+        assert db._engine.url.password == "s3cret"
 
     def test_translate_sql_converts_qmark_to_pyformat(self):
         db = PostgresDatabaseManager(

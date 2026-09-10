@@ -1,4 +1,4 @@
-"""Alembic-driven schema migrations for the DuckDB and SQLite backends."""
+"""Alembic-driven schema migrations for the DuckDB, SQLite, and Postgres backends."""
 
 from __future__ import annotations
 
@@ -31,6 +31,17 @@ def sqlite_sqlalchemy_url(db_path: str) -> str:
     sqlalchemy_url() above - sqlite has its own native ':memory:' syntax,
     but we keep the shared IN_MEMORY_DB_PATH constant and guard identically
     across both file-based backends rather than special-casing per backend.
+
+    This guard only prevents ':memory:' from being resolved into a literal
+    file path - it does NOT make ':memory:' a usable end-to-end database.
+    Every NullPool checkout (including Alembic's own migration engine in
+    migrations/env.py) opens a distinct, empty in-memory database, so
+    migrated tables from one connection are invisible to the next. Both
+    this function and duckdb_engine's equivalent share the limitation
+    (pre-existing for DuckDB, unchanged here). Safe for what it's actually
+    used for today (proving no stray ':memory:' file is created on disk);
+    not a working in-memory fixture backend - do not rely on it for that
+    without first fixing the cross-engine sharing this docstring describes.
     """
     if db_path == IN_MEMORY_DB_PATH:
         return "sqlite:///:memory:"
