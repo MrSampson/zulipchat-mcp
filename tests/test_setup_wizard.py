@@ -343,6 +343,56 @@ class TestPromptDatabaseBackend:
         assert env == {}
 
 
+class TestGenerateMcpConfigUvxExtra:
+    """duckdb/duckdb-engine are an opt-in extra (pyproject.toml); the uvx
+    path is what main() actually uses for every JSON-blob client config, so
+    it must request the extra and use a real `uvx` invocation, not `uv`.
+    """
+
+    def test_uvx_command_is_uvx_not_uv(self):
+        user_config = {"path": "/home/u/.zuliprc"}
+
+        config = generate_mcp_config(user_config, use_uvx=True)
+
+        assert config["command"].endswith("uvx")
+
+    def test_uvx_args_request_duckdb_extra(self):
+        user_config = {"path": "/home/u/.zuliprc"}
+
+        config = generate_mcp_config(user_config, use_uvx=True)
+
+        assert config["args"][0] == "--from"
+        assert config["args"][1] == "zulipchat-mcp[duckdb]"
+        assert "zulipchat-mcp" in config["args"]
+        assert "--zulip-config-file" in config["args"]
+        assert "/home/u/.zuliprc" in config["args"]
+
+    def test_non_uvx_path_is_unaffected(self):
+        """uv run zulipchat-mcp (the dev-checkout path) already has
+        duckdb/duckdb-engine via the dev dependency group - no extra needed.
+        """
+        user_config = {"path": "/home/u/.zuliprc"}
+
+        config = generate_mcp_config(user_config, use_uvx=False)
+
+        assert config["command"].endswith("uv")
+        assert config["args"] == [
+            "run",
+            "zulipchat-mcp",
+            "--zulip-config-file",
+            "/home/u/.zuliprc",
+        ]
+
+
+class TestGenerateClaudeCodeCommandUvxExtra:
+    def test_tail_requests_duckdb_extra(self):
+        user_config = {"path": "/home/u/.zuliprc"}
+
+        cmd = generate_claude_code_command(user_config)
+
+        assert "-- uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp" in cmd
+
+
 class TestGenerateMcpConfigEnv:
     """Tests for env threading through generate_mcp_config."""
 

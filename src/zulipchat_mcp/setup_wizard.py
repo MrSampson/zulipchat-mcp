@@ -307,6 +307,13 @@ def get_mcp_client_config_path(client_type: str) -> Path | None:
     return None
 
 
+# uvx needs an explicit --from with the extra to get a working backend, since
+# duckdb/duckdb-engine are no longer bundled by default (see pyproject.toml's
+# [project.optional-dependencies]) - a bare `uvx zulipchat-mcp` installs a
+# server with no working database backend.
+_UVX_PACKAGE_SPEC = "zulipchat-mcp[duckdb]"
+
+
 def _build_args(
     user_config: dict[str, Any],
     bot_config: dict[str, Any] | None,
@@ -316,7 +323,13 @@ def _build_args(
 ) -> list[str]:
     """Build MCP server command args."""
     if use_uvx:
-        args = ["zulipchat-mcp", "--zulip-config-file", user_config["path"]]
+        args = [
+            "--from",
+            _UVX_PACKAGE_SPEC,
+            "zulipchat-mcp",
+            "--zulip-config-file",
+            user_config["path"],
+        ]
     else:
         args = ["run", "zulipchat-mcp", "--zulip-config-file", user_config["path"]]
 
@@ -338,7 +351,11 @@ def generate_mcp_config(
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Generate MCP server configuration."""
-    command = shutil.which("uv") or "uv"
+    # A plain `uv <script>` (no `run`/`uvx` subcommand) is not a valid uv
+    # invocation - the uvx branch must actually invoke `uvx`, not `uv`.
+    command = (
+        (shutil.which("uvx") or "uvx") if use_uvx else (shutil.which("uv") or "uv")
+    )
     args = _build_args(
         user_config,
         bot_config,
@@ -374,7 +391,7 @@ def generate_claude_code_command(
         # would otherwise break the command or shell-expand unexpectedly.
         parts.append(f"-e {key}={shlex.quote(value)}")
 
-    cmd_tail = "-- uvx zulipchat-mcp"
+    cmd_tail = f"-- uvx --from '{_UVX_PACKAGE_SPEC}' zulipchat-mcp"
     if extended_tools:
         cmd_tail += " --extended-tools"
     parts.append(cmd_tail)
@@ -501,6 +518,12 @@ def prompt_database_backend() -> dict[str, str]:
         port = prompt("Postgres port", default="5432")
         dbname = prompt("Postgres database name")
         user = prompt("Postgres user")
+        print(
+            f"{YELLOW}Note: this password is written in plaintext into "
+            f"your MCP client's config file (that's how MCP client configs "
+            f"work) - the terminal prompt itself is hidden, but the saved "
+            f"file is not encrypted.{RESET}"
+        )
         # getpass, not prompt(): prompt() wraps bare input(), which echoes
         # the password to the terminal (and into scrollback/screen-shares).
         password = getpass.getpass("Postgres password: ")
