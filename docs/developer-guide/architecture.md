@@ -37,7 +37,7 @@ This produces:
 ## Startup flow
 
 1. Apply protocol compatibility patch (`core/compat.py`).
-2. Parse CLI flags (`--transport stdio|http`, `--host`, `--port`, `--auth-token`).
+2. Parse CLI flags (`--transport stdio|http`, `--host`, `--port`, `--service-token`, `--oidc-client-id`, `--oidc-client-secret`, `--oidc-issuer`, `--public-url`).
 3. Initialize config manager.
 4. Validate credentials (`zuliprc` or env fallback).
 5. Set unsafe-mode context.
@@ -73,6 +73,6 @@ Under the 2026-07-28 stateless protocol, MCP sampling is removed from the server
 ## Security-related boundaries
 
 - `--unsafe` is off by default.
-- Bearer token authentication required on non-loopback HTTP binds (`--auth-token` / `ZULIPCHAT_HTTP_AUTH_TOKEN`).
+- Non-loopback HTTP binds require auth via one (or both) of two independent paths, combined through FastMCP's `MultiAuth`: a bearer `--service-token` / `ZULIPCHAT_MCP_SERVICE_TOKEN` for non-interactive/automated callers, and/or GitLab OAuth login (`--oidc-client-id` + `--oidc-issuer` + `--public-url`) for interactive human callers. Binding beyond localhost with neither configured logs a loud warning rather than failing closed.
 - Destructive topic delete path is guarded in `agents_channel_topic_ops`.
 - Agent emoji usage is validated against a fixed approved list.

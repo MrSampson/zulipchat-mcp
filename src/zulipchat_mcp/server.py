@@ -117,12 +117,44 @@ def main() -> None:
         help="Port to bind for --transport http (default: 8000)",
     )
     parser.add_argument(
-        "--auth-token",
-        default=os.getenv("ZULIPCHAT_HTTP_AUTH_TOKEN"),
+        "--service-token",
+        default=os.getenv("ZULIPCHAT_MCP_SERVICE_TOKEN"),
         help=(
-            "Bearer token required on HTTP requests (or set "
-            "ZULIPCHAT_HTTP_AUTH_TOKEN). Strongly recommended for any "
-            "non-localhost bind."
+            "Bearer token for non-interactive/automated callers only (or set "
+            "ZULIPCHAT_MCP_SERVICE_TOKEN). Not meant for humans — see "
+            "--oidc-client-id for interactive login."
+        ),
+    )
+    parser.add_argument(
+        "--oidc-client-id",
+        default=os.getenv("ZULIPCHAT_MCP_OIDC_CLIENT_ID"),
+        help="OAuth client ID for interactive login (or set ZULIPCHAT_MCP_OIDC_CLIENT_ID).",
+    )
+    parser.add_argument(
+        "--oidc-client-secret",
+        default=os.getenv("ZULIPCHAT_MCP_OIDC_CLIENT_SECRET"),
+        help="OAuth client secret (or set ZULIPCHAT_MCP_OIDC_CLIENT_SECRET).",
+    )
+    parser.add_argument(
+        "--oidc-issuer",
+        # No hardcoded default: this is a public repo (public repo hygiene —
+        # no internal-infrastructure hostnames in the fork's source). The
+        # deploying operator sets ZULIPCHAT_MCP_OIDC_ISSUER explicitly.
+        default=os.getenv("ZULIPCHAT_MCP_OIDC_ISSUER"),
+        help=(
+            "OIDC issuer URL for interactive login, e.g. your GitLab "
+            "instance (or set ZULIPCHAT_MCP_OIDC_ISSUER). Required if "
+            "--oidc-client-id is set."
+        ),
+    )
+    parser.add_argument(
+        "--public-url",
+        default=os.getenv("ZULIPCHAT_MCP_PUBLIC_URL"),
+        help=(
+            "Externally-reachable base URL of this server (e.g. "
+            "https://your-mcp-server.example.com) — required for OAuth redirect "
+            "construction if --oidc-client-id is set (or set "
+            "ZULIPCHAT_MCP_PUBLIC_URL)."
         ),
     )
 
@@ -171,22 +203,67 @@ def main() -> None:
             "ANTHROPIC_API_KEY not set - AI analytics tools return structured data only"
         )
 
-    # HTTP transport auth: require an explicit bearer token when binding
-    # beyond localhost unless the operator opts out with a loopback bind.
+    # HTTP transport auth: interactive callers authenticate via GitLab OAuth
+    # (--oidc-client-id); non-interactive/automated callers use a separate,
+    # narrowly-scoped bearer token (--service-token) that no human pastes
+    # into their own config. Binding beyond localhost with neither configured
+    # is a loud misconfiguration, not a silent open door.
     auth = None
     if args.transport == "http":
-        if args.auth_token:
-            from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+        from fastmcp.server.auth import MultiAuth, OIDCProxy
+        from fastmcp.server.auth.auth import TokenVerifier
+        from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
-            auth = StaticTokenVerifier(
-                tokens={args.auth_token: {"client_id": "zulipchat-http", "scopes": []}}
+        verifiers: list[TokenVerifier] = []
+        if args.service_token:
+            verifiers.append(
+                StaticTokenVerifier(
+                    tokens={
+                        args.service_token: {
+                            "client_id": "zulipchat-service",
+                            "scopes": [],
+                        }
+                    }
+                )
             )
-            logger.info("HTTP transport: bearer token auth enabled")
+            logger.info("HTTP transport: service-token auth enabled")
+
+        oidc_server = None
+        if args.oidc_client_id:
+            if not args.public_url or not args.oidc_issuer:
+                missing = [
+                    name
+                    for name, val in (
+                        ("--public-url", args.public_url),
+                        ("--oidc-issuer", args.oidc_issuer),
+                    )
+                    if not val
+                ]
+                logger.error(
+                    "--oidc-client-id set without %s - OAuth requires both "
+                    "the issuer URL and this server's externally-reachable "
+                    "URL. OIDC login will NOT be enabled.",
+                    " and ".join(missing),
+                )
+            else:
+                oidc_server = OIDCProxy(
+                    config_url=f"{args.oidc_issuer}/.well-known/openid-configuration",
+                    client_id=args.oidc_client_id,
+                    client_secret=args.oidc_client_secret,
+                    issuer_url=args.oidc_issuer,
+                    base_url=args.public_url,
+                )
+                logger.info("HTTP transport: GitLab OAuth login enabled")
+
+        if oidc_server is not None or verifiers:
+            auth = MultiAuth(server=oidc_server, verifiers=verifiers)
         elif args.host not in ("127.0.0.1", "localhost", "::1"):
             logger.warning(
-                "HTTP transport binding to %s WITHOUT --auth-token - any client "
-                "that can reach this port can call tools. Set "
-                "ZULIPCHAT_HTTP_AUTH_TOKEN or pass --auth-token.",
+                "HTTP transport binding to %s WITHOUT auth configured - any "
+                "client that can reach this port can call tools. Set "
+                "ZULIPCHAT_MCP_OIDC_CLIENT_ID (+ ZULIPCHAT_MCP_OIDC_ISSUER + "
+                "ZULIPCHAT_MCP_PUBLIC_URL) "
+                "and/or ZULIPCHAT_MCP_SERVICE_TOKEN.",
                 args.host,
             )
 

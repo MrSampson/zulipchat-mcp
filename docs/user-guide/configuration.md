@@ -37,7 +37,11 @@ zulipchat-mcp [options]
 - `--transport {stdio,http}`: Transport protocol (`stdio` default, `http` for streamable-HTTP)
 - `--host HOST`: Bind host for `--transport http` (default: `127.0.0.1`)
 - `--port PORT`: Bind port for `--transport http` (default: `8000`)
-- `--auth-token TOKEN`: Bearer authentication token for HTTP transport
+- `--service-token TOKEN`: Bearer token for non-interactive/automated callers (or `ZULIPCHAT_MCP_SERVICE_TOKEN`) — not for humans
+- `--oidc-client-id ID`: GitLab OAuth client ID for interactive login (or `ZULIPCHAT_MCP_OIDC_CLIENT_ID`)
+- `--oidc-client-secret SECRET`: GitLab OAuth client secret (or `ZULIPCHAT_MCP_OIDC_CLIENT_SECRET`)
+- `--oidc-issuer URL`: OIDC issuer URL, required with `--oidc-client-id` (or `ZULIPCHAT_MCP_OIDC_ISSUER`)
+- `--public-url URL`: Externally-reachable base URL, required with `--oidc-client-id` (or `ZULIPCHAT_MCP_PUBLIC_URL`)
 - `--unsafe`: Enable destructive operations that are otherwise blocked
 - `--debug`: Enable debug logging
 - `--enable-listener`: Backward-compatibility flag
@@ -68,7 +72,11 @@ compatibility.
 
 ### HTTP Transport & Security
 
-- `ZULIPCHAT_HTTP_AUTH_TOKEN`: Bearer token required for `--transport http` requests
+- `ZULIPCHAT_MCP_SERVICE_TOKEN`: Bearer token for non-interactive/automated `--transport http` callers
+- `ZULIPCHAT_MCP_OIDC_CLIENT_ID`: GitLab OAuth client ID for interactive login
+- `ZULIPCHAT_MCP_OIDC_CLIENT_SECRET`: GitLab OAuth client secret
+- `ZULIPCHAT_MCP_OIDC_ISSUER`: OIDC issuer URL, required if `ZULIPCHAT_MCP_OIDC_CLIENT_ID` is set
+- `ZULIPCHAT_MCP_PUBLIC_URL`: Externally-reachable base URL, required if `ZULIPCHAT_MCP_OIDC_CLIENT_ID` is set
 
 ### Runtime
 

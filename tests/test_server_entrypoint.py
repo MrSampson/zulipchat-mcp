@@ -153,8 +153,8 @@ def test_http_transport_passes_host_port_and_registers_tasks_extension():
     mcp.run.assert_called_once_with(transport="http", host="0.0.0.0", port=9000)
 
 
-def test_http_transport_non_localhost_without_token_warns():
-    """Binding HTTP beyond localhost without a token must warn loudly."""
+def test_http_transport_non_localhost_without_auth_warns():
+    """Binding HTTP beyond localhost with no auth configured at all must warn loudly."""
     cfg = MagicMock()
     cfg.validate_config.return_value = True
     logger = MagicMock()
@@ -172,19 +172,19 @@ def test_http_transport_non_localhost_without_token_warns():
             sys, "argv", ["zulipchat-mcp", "--transport", "http", "--host", "0.0.0.0"]
         ),
     ):
-        # Ensure no token leaks in from the environment
         import os
 
-        os.environ.pop("ZULIPCHAT_HTTP_AUTH_TOKEN", None)
+        os.environ.pop("ZULIPCHAT_MCP_SERVICE_TOKEN", None)
+        os.environ.pop("ZULIPCHAT_MCP_OIDC_CLIENT_ID", None)
         server.main()
 
     assert any(
-        "WITHOUT --auth-token" in str(call) for call in logger.warning.call_args_list
+        "WITHOUT auth configured" in str(call) for call in logger.warning.call_args_list
     )
 
 
-def test_http_transport_with_token_configures_auth():
-    """An auth token should produce a FastMCP auth provider on the server."""
+def test_http_transport_with_service_token_configures_multiauth():
+    """A service token alone should produce a MultiAuth with one verifier and no OAuth server."""
     cfg = MagicMock()
     cfg.validate_config.return_value = True
     mcp = MagicMock()
@@ -196,14 +196,148 @@ def test_http_transport_with_token_configures_auth():
         patch("src.zulipchat_mcp.server.init_database"),
         patch("src.zulipchat_mcp.server.FastMCP", return_value=mcp) as mock_fastmcp,
         patch("src.zulipchat_mcp.server.register_core_tools"),
+        patch.dict("os.environ", {}, clear=False),
         patch.object(
             sys,
             "argv",
-            ["zulipchat-mcp", "--transport", "http", "--auth-token", "secret-token"],
+            ["zulipchat-mcp", "--transport", "http", "--service-token", "secret-token"],
+        ),
+    ):
+        import os
+
+        os.environ.pop("ZULIPCHAT_MCP_OIDC_CLIENT_ID", None)
+        server.main()
+
+    auth = mock_fastmcp.call_args.kwargs["auth"]
+    assert auth is not None
+    assert auth.server is None
+    assert len(auth.verifiers) == 1
+    assert "secret-token" in auth.verifiers[0].tokens
+
+
+def test_http_transport_with_oidc_configures_multiauth_server():
+    """OIDC client id + public URL should produce a MultiAuth with an OIDCProxy server."""
+    cfg = MagicMock()
+    cfg.validate_config.return_value = True
+    mcp = MagicMock()
+    fake_oidc_server = MagicMock()
+
+    with (
+        patch("src.zulipchat_mcp.server.setup_structured_logging"),
+        patch("src.zulipchat_mcp.server.get_logger", return_value=MagicMock()),
+        patch("src.zulipchat_mcp.server.init_config_manager", return_value=cfg),
+        patch("src.zulipchat_mcp.server.init_database"),
+        patch("src.zulipchat_mcp.server.FastMCP", return_value=mcp) as mock_fastmcp,
+        patch("src.zulipchat_mcp.server.register_core_tools"),
+        # OIDCProxy performs OIDC discovery (a real HTTP GET to config_url) at
+        # construction time. Mock it so this stays a network-free unit test
+        # regardless of whether --oidc-issuer's host is reachable/resolvable.
+        patch("fastmcp.server.auth.OIDCProxy", return_value=fake_oidc_server),
+        patch.object(
+            sys,
+            "argv",
+            [
+                "zulipchat-mcp",
+                "--transport",
+                "http",
+                "--oidc-client-id",
+                "test-client-id",
+                "--oidc-client-secret",
+                "test-secret",
+                "--oidc-issuer",
+                "https://gitlab.example.com",
+                "--public-url",
+                "https://your-mcp-server.example.com",
+            ],
         ),
     ):
         server.main()
 
     auth = mock_fastmcp.call_args.kwargs["auth"]
     assert auth is not None
-    assert "secret-token" in auth.tokens
+    assert auth.server is fake_oidc_server
+    assert auth.verifiers == []
+
+
+def test_http_transport_oidc_without_public_url_errors_and_skips_oidc():
+    """--oidc-client-id without --public-url must not silently construct a broken OIDCProxy."""
+    cfg = MagicMock()
+    cfg.validate_config.return_value = True
+    logger = MagicMock()
+    mcp = MagicMock()
+
+    with (
+        patch("src.zulipchat_mcp.server.setup_structured_logging"),
+        patch("src.zulipchat_mcp.server.get_logger", return_value=logger),
+        patch("src.zulipchat_mcp.server.init_config_manager", return_value=cfg),
+        patch("src.zulipchat_mcp.server.init_database"),
+        patch("src.zulipchat_mcp.server.FastMCP", return_value=mcp) as mock_fastmcp,
+        patch("src.zulipchat_mcp.server.register_core_tools"),
+        patch.dict("os.environ", {}, clear=False),
+        patch.object(
+            sys,
+            "argv",
+            [
+                "zulipchat-mcp",
+                "--transport",
+                "http",
+                "--host",
+                "0.0.0.0",
+                "--oidc-client-id",
+                "test-client-id",
+                "--oidc-issuer",
+                "https://gitlab.example.com",
+            ],
+        ),
+    ):
+        import os
+
+        os.environ.pop("ZULIPCHAT_MCP_PUBLIC_URL", None)
+        os.environ.pop("ZULIPCHAT_MCP_SERVICE_TOKEN", None)
+        server.main()
+
+    assert any("--public-url" in str(call) for call in logger.error.call_args_list)
+    auth = mock_fastmcp.call_args.kwargs["auth"]
+    assert auth is None
+
+
+def test_http_transport_oidc_without_issuer_errors_and_skips_oidc():
+    """--oidc-client-id without --oidc-issuer must not silently construct a broken OIDCProxy."""
+    cfg = MagicMock()
+    cfg.validate_config.return_value = True
+    logger = MagicMock()
+    mcp = MagicMock()
+
+    with (
+        patch("src.zulipchat_mcp.server.setup_structured_logging"),
+        patch("src.zulipchat_mcp.server.get_logger", return_value=logger),
+        patch("src.zulipchat_mcp.server.init_config_manager", return_value=cfg),
+        patch("src.zulipchat_mcp.server.init_database"),
+        patch("src.zulipchat_mcp.server.FastMCP", return_value=mcp) as mock_fastmcp,
+        patch("src.zulipchat_mcp.server.register_core_tools"),
+        patch.dict("os.environ", {}, clear=False),
+        patch.object(
+            sys,
+            "argv",
+            [
+                "zulipchat-mcp",
+                "--transport",
+                "http",
+                "--host",
+                "0.0.0.0",
+                "--oidc-client-id",
+                "test-client-id",
+                "--public-url",
+                "https://your-mcp-server.example.com",
+            ],
+        ),
+    ):
+        import os
+
+        os.environ.pop("ZULIPCHAT_MCP_OIDC_ISSUER", None)
+        os.environ.pop("ZULIPCHAT_MCP_SERVICE_TOKEN", None)
+        server.main()
+
+    assert any("--oidc-issuer" in str(call) for call in logger.error.call_args_list)
+    auth = mock_fastmcp.call_args.kwargs["auth"]
+    assert auth is None

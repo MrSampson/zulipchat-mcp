@@ -132,7 +132,7 @@ def test_print_remote_generic_with_token(monkeypatch, capsys):
 
 def test_print_remote_vscode_without_token(monkeypatch, capsys):
     """Remote snippets omit the Authorization header when no token is set."""
-    monkeypatch.delenv("ZULIPCHAT_HTTP_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ZULIPCHAT_MCP_SERVICE_TOKEN", raising=False)
     _run_main(
         monkeypatch,
         ["print", "--client", "vscode", "--remote-url", "http://mcp.internal:8000/mcp"],
