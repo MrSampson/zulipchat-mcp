@@ -168,8 +168,8 @@ def main() -> None:
     )
     print_parser.add_argument(
         "--remote-token",
-        default=os.environ.get("ZULIPCHAT_HTTP_AUTH_TOKEN"),
-        help="Bearer token for --remote-url (default: ZULIPCHAT_HTTP_AUTH_TOKEN)",
+        default=os.environ.get("ZULIPCHAT_MCP_SERVICE_TOKEN"),
+        help="Bearer token for --remote-url (default: ZULIPCHAT_MCP_SERVICE_TOKEN)",
     )
 
     export_parser = sub.add_parser(

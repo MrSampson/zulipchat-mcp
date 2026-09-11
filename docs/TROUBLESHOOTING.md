@@ -66,7 +66,7 @@ uvx --from zulipchat-mcp zulipchat-mcp-setup
 ## HTTP transport returns 401 Unauthorized
 
 - When binding `--transport http` beyond `127.0.0.1`, bearer token authentication is enabled.
-- Ensure requests include `Authorization: Bearer <token>` matching `--auth-token` or `ZULIPCHAT_HTTP_AUTH_TOKEN`.
+- If you're using the service-token (automation) path, ensure requests include `Authorization: Bearer <token>` matching `--service-token` or `ZULIPCHAT_MCP_SERVICE_TOKEN`.
 
 ## Multi-replica HTTP database locking
 

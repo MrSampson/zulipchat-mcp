@@ -42,7 +42,7 @@ In the 2026-07-28 stateless protocol (FastMCP 4+), MCP sampling was removed from
 
 ### Stateless HTTP Transport
 - `--transport http` serves on streamable-HTTP (port 8000 by default).
-- Authentication: Set `--auth-token` or `ZULIPCHAT_HTTP_AUTH_TOKEN` (Bearer token auth). Required when binding beyond `127.0.0.1`.
+- Authentication: two independent paths, combined via FastMCP's `MultiAuth` — `--service-token` / `ZULIPCHAT_MCP_SERVICE_TOKEN` (bearer token, non-interactive/automated callers) and/or `--oidc-client-id` + `--oidc-issuer` + `--public-url` (GitLab OAuth login, interactive human callers). At least one is required when binding beyond `127.0.0.1`.
 - **Multi-replica note**: the default DuckDB/SQLite backends are single-writer file databases. When deploying multiple HTTP replicas, either point each instance at a distinct file, run a single-instance deployment, or set `DATABASE_BACKEND=postgres` (install with the `postgres` extra) for a real multi-writer backend.
 
 ### Bidirectional Agent Communication (v0.4+)

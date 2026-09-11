@@ -152,7 +152,11 @@ Add to your MCP configuration:
 | `--transport {stdio,http}` | Transport to serve on (default: `stdio`) |
 | `--host HOST` | Bind host for HTTP transport (default: `127.0.0.1`) |
 | `--port PORT` | Bind port for HTTP transport (default: `8000`) |
-| `--auth-token TOKEN` | Bearer auth token for HTTP transport (or `ZULIPCHAT_HTTP_AUTH_TOKEN`) |
+| `--service-token TOKEN` | Bearer token for non-interactive/automated callers (or `ZULIPCHAT_MCP_SERVICE_TOKEN`) — not for humans |
+| `--oidc-client-id ID` | GitLab OAuth client ID for interactive login (or `ZULIPCHAT_MCP_OIDC_CLIENT_ID`) |
+| `--oidc-client-secret SECRET` | GitLab OAuth client secret (or `ZULIPCHAT_MCP_OIDC_CLIENT_SECRET`) |
+| `--oidc-issuer URL` | OIDC issuer URL, required with `--oidc-client-id` (or `ZULIPCHAT_MCP_OIDC_ISSUER`) |
+| `--public-url URL` | Externally-reachable base URL, required with `--oidc-client-id` (or `ZULIPCHAT_MCP_PUBLIC_URL`) |
 | `--unsafe` | Enable administrative tools (use with caution) |
 | `--debug` | Enable debug logging |
 
@@ -186,8 +190,15 @@ pip install zulipchat-mcp[postgres]   # or: uv add zulipchat-mcp[postgres]
 ZulipChat MCP supports stateless HTTP deployments under the MCP 2026-07-28 protocol:
 
 ```bash
-# Run server over HTTP with bearer authentication
-ZULIPCHAT_HTTP_AUTH_TOKEN=your-secret-token \
+# Non-interactive / automation (service token)
+ZULIPCHAT_MCP_SERVICE_TOKEN=your-secret-token \
+  uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc --transport http --host 0.0.0.0 --port 8000
+
+# Interactive login via OAuth (e.g. your GitLab instance)
+ZULIPCHAT_MCP_OIDC_CLIENT_ID=your-client-id \
+ZULIPCHAT_MCP_OIDC_CLIENT_SECRET=your-client-secret \
+ZULIPCHAT_MCP_OIDC_ISSUER=https://gitlab.example.com \
+ZULIPCHAT_MCP_PUBLIC_URL=https://your-mcp-server.example.com \
   uvx --from 'zulipchat-mcp[duckdb]' zulipchat-mcp --zulip-config-file ~/.zuliprc --transport http --host 0.0.0.0 --port 8000
 ```
 
