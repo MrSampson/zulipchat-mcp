@@ -232,7 +232,9 @@ def test_http_transport_with_oidc_configures_multiauth_server():
         # OIDCProxy performs OIDC discovery (a real HTTP GET to config_url) at
         # construction time. Mock it so this stays a network-free unit test
         # regardless of whether --oidc-issuer's host is reachable/resolvable.
-        patch("fastmcp.server.auth.OIDCProxy", return_value=fake_oidc_server),
+        patch(
+            "fastmcp.server.auth.OIDCProxy", return_value=fake_oidc_server
+        ) as mock_oidc_proxy,
         patch.object(
             sys,
             "argv",
@@ -256,6 +258,15 @@ def test_http_transport_with_oidc_configures_multiauth_server():
     auth = mock_fastmcp.call_args.kwargs["auth"]
     assert auth is not None
     assert auth.server is fake_oidc_server
+
+    # issuer_url identifies this proxy's own issuer identity (used in the
+    # OAuth metadata it publishes and as the audience/iss claim it checks on
+    # its own issued tokens) — it must be the server's own public URL, never
+    # the upstream IdP's URL (that belongs only in config_url, which locates
+    # the upstream's discovery document).
+    oidc_kwargs = mock_oidc_proxy.call_args.kwargs
+    assert oidc_kwargs["issuer_url"] == "https://your-mcp-server.example.com"
+    assert oidc_kwargs["issuer_url"] != "https://gitlab.example.com"
     assert auth.verifiers == []
 
 

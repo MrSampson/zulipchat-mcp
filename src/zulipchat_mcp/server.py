@@ -250,7 +250,7 @@ def main() -> None:
                     config_url=f"{args.oidc_issuer}/.well-known/openid-configuration",
                     client_id=args.oidc_client_id,
                     client_secret=args.oidc_client_secret,
-                    issuer_url=args.oidc_issuer,
+                    issuer_url=args.public_url,
                     base_url=args.public_url,
                 )
                 logger.info("HTTP transport: GitLab OAuth login enabled")
