@@ -269,6 +269,11 @@ def test_http_transport_with_oidc_configures_multiauth_server():
     assert oidc_kwargs["issuer_url"] != "https://gitlab.example.com"
     assert auth.verifiers == []
 
+    # Without an explicit scope request, OAuthProxy omits the `scope`
+    # parameter from the upstream authorize redirect entirely, and providers
+    # with no default_scopes fallback reject the request as invalid.
+    assert oidc_kwargs["required_scopes"] == ["openid", "profile", "email"]
+
 
 def test_http_transport_oidc_without_public_url_errors_and_skips_oidc():
     """--oidc-client-id without --public-url must not silently construct a broken OIDCProxy."""
