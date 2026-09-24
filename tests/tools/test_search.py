@@ -1,6 +1,7 @@
 """Tests for tools/search.py."""
 
 from datetime import datetime, timedelta
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -160,10 +161,97 @@ class TestSearchTools:
         assert args["anchor"] == "newest"
 
     @pytest.mark.asyncio
-    async def test_time_filter_with_stream_uses_anchor_date(self, mock_deps):
-        """Test that anchor='date' is used when a stream narrow is provided."""
+    async def test_time_filter_with_stream_avoids_anchor_date(self, mock_deps):
+        """A stream narrow + time filter must not use anchor="date".
+
+        anchor="date" needs feature level 445 (Zulip 12.0+). A server older
+        than that rejects it with "Invalid anchor" on every call, so
+        search_messages must position via anchor="newest" and filter by
+        timestamp client-side instead, same as the no-narrow path - and the
+        filter must actually drop messages outside the window.
+        """
         now = datetime.now()
         ts_now = now.timestamp()
+        ts_old = (now - timedelta(hours=5)).timestamp()
+
+        def message(msg_id: int, timestamp: float, content: str) -> dict[str, Any]:
+            return {
+                "id": msg_id,
+                "sender_full_name": "U",
+                "sender_email": "e",
+                "timestamp": timestamp,
+                "content": content,
+                "type": "stream",
+                "display_recipient": "test-stream",
+                "subject": "topic",
+            }
+
+        def get_messages_raw(**kwargs: object) -> dict[str, object]:
+            if kwargs.get("anchor") == "date":
+                # Mirrors the real Zulip server's response on a version that
+                # predates feature level 445.
+                return {"result": "error", "msg": "Invalid anchor"}
+            return {
+                "result": "success",
+                "messages": [
+                    message(1, ts_old, "old"),
+                    message(2, ts_now, "recent"),
+                ],
+            }
+
+        mock_deps.get_messages_raw.side_effect = get_messages_raw
+
+        result = await search_messages(stream="test-stream", last_hours=1)
+
+        assert result["status"] == "success"
+        assert len(result["messages"]) == 1
+        assert result["messages"][0]["content"] == "recent"
+
+        args = mock_deps.get_messages_raw.call_args[1]
+        assert args["anchor"] == "newest"
+
+    @pytest.mark.asyncio
+    async def test_time_filter_with_stream_trims_to_limit(self, mock_deps):
+        """The limit*2 over-fetch (to compensate for cutoff filtering) must
+        be trimmed back down to `limit` after filtering."""
+        now = datetime.now()
+
+        mock_deps.get_messages_raw.return_value = {
+            "result": "success",
+            "messages": [
+                {
+                    "id": i,
+                    "sender_full_name": "U",
+                    "sender_email": "e",
+                    "timestamp": (now - timedelta(minutes=i)).timestamp(),
+                    "content": f"msg{i}",
+                    "type": "stream",
+                    "display_recipient": "test-stream",
+                    "subject": "topic",
+                }
+                for i in range(4)
+            ],
+        }
+
+        result = await search_messages(stream="test-stream", last_hours=1, limit=2)
+
+        assert result["status"] == "success"
+        assert len(result["messages"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_time_filter_oldest_sort_returns_window(self, mock_deps):
+        """sort_by="oldest" combined with a time filter must return the
+        oldest in-window messages, not an empty result.
+
+        Regression test: fetching via anchor="oldest" with a cutoff set
+        would fetch from the narrow's entire history and the cutoff filter
+        would discard all of it, since those are the very oldest messages
+        ever posted (predating the cutoff).
+        """
+        now = datetime.now()
+        ts_in_window_old = (now - timedelta(minutes=50)).timestamp()
+        ts_in_window_new = (now - timedelta(minutes=10)).timestamp()
+        ts_outside_window = (now - timedelta(hours=5)).timestamp()
 
         mock_deps.get_messages_raw.return_value = {
             "result": "success",
@@ -172,8 +260,28 @@ class TestSearchTools:
                     "id": 1,
                     "sender_full_name": "U",
                     "sender_email": "e",
-                    "timestamp": ts_now,
-                    "content": "msg",
+                    "timestamp": ts_outside_window,
+                    "content": "too old",
+                    "type": "stream",
+                    "display_recipient": "test-stream",
+                    "subject": "topic",
+                },
+                {
+                    "id": 2,
+                    "sender_full_name": "U",
+                    "sender_email": "e",
+                    "timestamp": ts_in_window_old,
+                    "content": "oldest in window",
+                    "type": "stream",
+                    "display_recipient": "test-stream",
+                    "subject": "topic",
+                },
+                {
+                    "id": 3,
+                    "sender_full_name": "U",
+                    "sender_email": "e",
+                    "timestamp": ts_in_window_new,
+                    "content": "newest in window",
                     "type": "stream",
                     "display_recipient": "test-stream",
                     "subject": "topic",
@@ -181,15 +289,26 @@ class TestSearchTools:
             ],
         }
 
-        # Search with stream filter = anchor="date" is used
-        result = await search_messages(stream="test-stream", last_hours=1)
+        result = await search_messages(
+            stream="test-stream", last_hours=1, sort_by="oldest", limit=1
+        )
+
+        assert result["status"] == "success"
+        assert len(result["messages"]) == 1
+        assert result["messages"][0]["content"] == "oldest in window"
+
+    @pytest.mark.asyncio
+    async def test_oldest_sort_without_time_filter_uses_anchor_oldest(self, mock_deps):
+        """sort_by="oldest" with no time filter fetches via anchor="oldest"
+        directly (no cutoff to worry about, so no client-side re-sort)."""
+        result = await search_messages(sort_by="oldest", limit=5)
 
         assert result["status"] == "success"
 
-        # With a narrow filter, anchor="date" is used efficiently
         args = mock_deps.get_messages_raw.call_args[1]
-        assert args["anchor"] == "date"
-        assert args["anchor_date"] is not None
+        assert args["anchor"] == "oldest"
+        assert args["num_before"] == 0
+        assert args["num_after"] == 5
 
     @pytest.mark.asyncio
     async def test_search_messages_fuzzy_user(self, mock_deps):

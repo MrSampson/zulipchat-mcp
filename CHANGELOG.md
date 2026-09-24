@@ -4,6 +4,9 @@ All notable changes to ZulipChat MCP are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- `search_messages` and `get_messages_from_stream` no longer send Zulip's `anchor="date"` (needs server feature level 445 / Zulip 12.0+) when combining a time filter with a narrow. Older self-hosted Zulip servers reject that anchor value outright with `"Invalid anchor"`, failing every such call. Both now position via `anchor="newest"` and filter by timestamp client-side, which works against any server version. Note: with a narrow and a time filter, `search_messages` previously (when talking to a 12.0+ server) returned the *earliest* messages in the window; it now returns the *most recent* ones, matching its documented default and the no-narrow behavior. `sort_by="oldest"` combined with a time filter is unaffected - it still returns the oldest in-window messages.
+
 ### Added
 - **Pluggable database backend (`DATABASE_BACKEND`)**: agent state persistence now selects its backend with `DATABASE_BACKEND=duckdb|sqlite|postgres`. The default is unchanged (`duckdb`). `sqlite` needs no extra dependency; `postgres` is configured with `POSTGRES_HOST`, `POSTGRES_PORT` (default `5432`), `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`, and is the option for multi-writer/multi-replica HTTP deployments. `ZULIPCHAT_DB_PATH` continues to set the file path for the two file-based backends. An unrecognized `DATABASE_BACKEND`, or a `postgres` backend missing `POSTGRES_HOST`/`POSTGRES_DB`/`POSTGRES_USER`, is rejected at startup instead of failing later with an opaque connection error.
 - **`[postgres]` extra**: `pip install zulipchat-mcp[postgres]` (or `uv add zulipchat-mcp[postgres]`) installs the `psycopg` driver needed by the `postgres` backend.

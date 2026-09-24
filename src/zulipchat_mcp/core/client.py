@@ -258,8 +258,11 @@ class ZulipClientWrapper:
     ) -> dict[str, Any]:
         """Get messages from a specific stream within time range.
 
-        Uses Zulip's anchor="date" + anchor_date parameter (Zulip 12.0+, feature level 445)
-        to position the anchor at the cutoff time, then fetches messages after that point.
+        Fetches the most recent messages via anchor="newest" and filters by
+        timestamp client-side. Zulip's anchor="date" + anchor_date would let
+        the server position the anchor at the cutoff directly, but it needs
+        feature level 445 (Zulip 12.0+) - a server older than that rejects
+        it outright with "Invalid anchor".
         """
         narrow: list[dict[str, Any]] = []
         if stream_name:
@@ -269,18 +272,30 @@ class ZulipClientWrapper:
 
         # Calculate cutoff time for time-based filtering
         cutoff_time = datetime.now() - timedelta(hours=hours_back)
-        anchor_date_str = cutoff_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        cutoff_ts = cutoff_time.timestamp()
 
-        return self.get_messages_raw(
-            anchor="date",
-            anchor_date=anchor_date_str,
+        result = self.get_messages_raw(
+            anchor="newest",
             narrow=narrow,
-            num_before=0,  # No messages before the cutoff
-            num_after=limit,  # Messages after the cutoff
+            num_before=limit * 2,  # Fetch extra to account for filtering
+            num_after=0,
             include_anchor=True,
             client_gravatar=True,
             apply_markdown=True,
         )
+
+        if result.get("result") == "success":
+            filtered = [
+                m
+                for m in result.get("messages", [])
+                if m.get("timestamp", 0) >= cutoff_ts
+            ]
+            # The over-fetch above can leave more than `limit` messages after
+            # filtering; keep the most recent `limit` (messages come back in
+            # ascending order, so that's the tail of the list).
+            result["messages"] = filtered[-limit:]
+
+        return result
 
     def search_messages(self, query: str, num_results: int = 50) -> dict[str, Any]:
         """Search messages by content."""
