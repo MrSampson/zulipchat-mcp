@@ -261,8 +261,8 @@ class ZulipClientWrapper:
         Fetches the most recent messages via anchor="newest" and filters by
         timestamp client-side. Zulip's anchor="date" + anchor_date would let
         the server position the anchor at the cutoff directly, but it needs
-        Zulip 12.0+ (feature level 445) and the production server predates
-        that - it rejects anchor="date" outright with "Invalid anchor".
+        feature level 445 (Zulip 12.0+) - a server older than that rejects
+        it outright with "Invalid anchor".
         """
         narrow: list[dict[str, Any]] = []
         if stream_name:
@@ -285,11 +285,15 @@ class ZulipClientWrapper:
         )
 
         if result.get("result") == "success":
-            result["messages"] = [
+            filtered = [
                 m
                 for m in result.get("messages", [])
                 if m.get("timestamp", 0) >= cutoff_ts
             ]
+            # The over-fetch above can leave more than `limit` messages after
+            # filtering; keep the most recent `limit` (messages come back in
+            # ascending order, so that's the tail of the list).
+            result["messages"] = filtered[-limit:]
 
         return result
 

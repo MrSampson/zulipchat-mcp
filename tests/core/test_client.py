@@ -260,20 +260,25 @@ class TestZulipClientWrapper:
     ):
         """get_messages_from_stream must not send anchor="date".
 
-        anchor="date" needs Zulip 12.0+ (feature level 445). Production runs
-        an older self-hosted server that rejects it with "Invalid anchor" on
-        every call, so this must position via anchor="newest" and filter by
-        timestamp client-side instead.
+        anchor="date" needs feature level 445 (Zulip 12.0+). A server older
+        than that rejects it with "Invalid anchor" on every call, so this
+        must position via anchor="newest" and filter by timestamp
+        client-side instead - and the filter must actually drop messages
+        outside the window.
         """
         wrapper = ZulipClientWrapper(config_manager=mock_config_manager)
         recent_ts = time.time()
+        old_ts = recent_ts - 5 * 3600
 
         def get_messages(request: dict) -> dict:
             if request.get("anchor") == "date":
                 return {"result": "error", "msg": "Invalid anchor"}
             return {
                 "result": "success",
-                "messages": [{"id": 1, "timestamp": recent_ts, "content": "hi"}],
+                "messages": [
+                    {"id": 1, "timestamp": old_ts, "content": "old"},
+                    {"id": 2, "timestamp": recent_ts, "content": "recent"},
+                ],
             }
 
         mock_zulip_client.get_messages.side_effect = get_messages
@@ -282,3 +287,43 @@ class TestZulipClientWrapper:
 
         assert result["result"] == "success"
         assert len(result["messages"]) == 1
+        assert result["messages"][0]["content"] == "recent"
+
+    def test_get_messages_from_stream_trims_to_limit(
+        self, mock_config_manager, mock_zulip_client
+    ):
+        """The limit*2 over-fetch (to compensate for cutoff filtering) must
+        be trimmed back down to `limit` after filtering."""
+        wrapper = ZulipClientWrapper(config_manager=mock_config_manager)
+        now = time.time()
+
+        mock_zulip_client.get_messages.return_value = {
+            "result": "success",
+            "messages": [
+                {"id": i, "timestamp": now - i * 60, "content": f"msg{i}"}
+                for i in range(4)
+            ],
+        }
+
+        result = wrapper.get_messages_from_stream(
+            stream_name="general", hours_back=1, limit=2
+        )
+
+        assert result["result"] == "success"
+        assert len(result["messages"]) == 2
+
+    def test_get_messages_from_stream_passes_through_error(
+        self, mock_config_manager, mock_zulip_client
+    ):
+        """A non-success result from the server (other than "Invalid
+        anchor") must pass through unchanged, not be treated as messages."""
+        wrapper = ZulipClientWrapper(config_manager=mock_config_manager)
+
+        mock_zulip_client.get_messages.return_value = {
+            "result": "error",
+            "msg": "Bad request",
+        }
+
+        result = wrapper.get_messages_from_stream(stream_name="general")
+
+        assert result == {"result": "error", "msg": "Bad request"}
