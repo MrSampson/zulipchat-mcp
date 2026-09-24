@@ -160,36 +160,47 @@ class TestSearchTools:
         assert args["anchor"] == "newest"
 
     @pytest.mark.asyncio
-    async def test_time_filter_with_stream_uses_anchor_date(self, mock_deps):
-        """Test that anchor='date' is used when a stream narrow is provided."""
+    async def test_time_filter_with_stream_avoids_anchor_date(self, mock_deps):
+        """A stream narrow + time filter must not use anchor="date".
+
+        anchor="date" needs Zulip 12.0+ (feature level 445). Production runs
+        an older self-hosted server that rejects it with "Invalid anchor" on
+        every call, so search_messages must position via anchor="newest" and
+        filter by timestamp client-side instead, same as the no-narrow path.
+        """
         now = datetime.now()
         ts_now = now.timestamp()
 
-        mock_deps.get_messages_raw.return_value = {
-            "result": "success",
-            "messages": [
-                {
-                    "id": 1,
-                    "sender_full_name": "U",
-                    "sender_email": "e",
-                    "timestamp": ts_now,
-                    "content": "msg",
-                    "type": "stream",
-                    "display_recipient": "test-stream",
-                    "subject": "topic",
-                },
-            ],
-        }
+        def get_messages_raw(**kwargs: object) -> dict[str, object]:
+            if kwargs.get("anchor") == "date":
+                # Mirrors the real Zulip server's response on a version that
+                # predates feature level 445.
+                return {"result": "error", "msg": "Invalid anchor"}
+            return {
+                "result": "success",
+                "messages": [
+                    {
+                        "id": 1,
+                        "sender_full_name": "U",
+                        "sender_email": "e",
+                        "timestamp": ts_now,
+                        "content": "msg",
+                        "type": "stream",
+                        "display_recipient": "test-stream",
+                        "subject": "topic",
+                    },
+                ],
+            }
 
-        # Search with stream filter = anchor="date" is used
+        mock_deps.get_messages_raw.side_effect = get_messages_raw
+
         result = await search_messages(stream="test-stream", last_hours=1)
 
         assert result["status"] == "success"
+        assert len(result["messages"]) == 1
 
-        # With a narrow filter, anchor="date" is used efficiently
         args = mock_deps.get_messages_raw.call_args[1]
-        assert args["anchor"] == "date"
-        assert args["anchor_date"] is not None
+        assert args["anchor"] == "newest"
 
     @pytest.mark.asyncio
     async def test_search_messages_fuzzy_user(self, mock_deps):

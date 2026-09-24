@@ -290,12 +290,15 @@ async def search_messages(
 
         # Determine anchor strategy based on time filters and sort
         anchor: str = "newest"
-        anchor_date: str | None = None
         num_before = limit
         num_after = 0
 
-        # Time-based filtering uses anchor="date" (Zulip 12.0+, feature level 445)
-        # NOTE: anchor_date positions the anchor but does NOT filter - post-fetch filtering required
+        # Zulip's anchor="date" + anchor_date would let the server position
+        # the anchor at the cutoff directly, but it needs Zulip 12.0+
+        # (feature level 445) and the production server predates that -
+        # it rejects anchor="date" outright with "Invalid anchor". Fetch
+        # recent messages via anchor="newest" instead and filter by
+        # timestamp client-side, which works on any server version.
         cutoff_ts: float | None = None
         before_ts: float | None = None
 
@@ -318,19 +321,8 @@ async def search_messages(
 
             if cutoff:
                 cutoff_ts = cutoff.timestamp()
-                # anchor="date" only works efficiently WITH a narrow filter.
-                # Without a narrow, the server times out searching entire DB.
-                # Fallback: use anchor="newest" and filter client-side.
-                if narrow:
-                    anchor = "date"
-                    anchor_date = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    num_before = 0
-                    num_after = limit
-                else:
-                    # No narrow: fetch newest messages, filter by timestamp client-side
-                    anchor = "newest"
-                    num_before = limit * 2  # Fetch extra to account for filtering
-                    num_after = 0
+                num_before = limit * 2  # Fetch extra to account for filtering
+                num_after = 0
 
         if before_time:
             bt = (
@@ -340,7 +332,7 @@ async def search_messages(
             )
             before_ts = bt.timestamp()
 
-        if sort_by == "oldest" and anchor != "date":
+        if sort_by == "oldest":
             anchor = "oldest"
             num_before = 0
             num_after = limit
@@ -348,7 +340,6 @@ async def search_messages(
         # Execute search
         result = client.get_messages_raw(
             anchor=anchor,
-            anchor_date=anchor_date,
             narrow=cast(list[dict[str, Any]], narrow),
             num_before=num_before,
             num_after=num_after,
@@ -360,7 +351,7 @@ async def search_messages(
         if result.get("result") == "success":
             messages = result.get("messages", [])
 
-            # Post-fetch time filtering (anchor_date positions anchor, doesn't filter)
+            # Post-fetch time filtering (Zulip doesn't filter by cutoff server-side here)
             if cutoff_ts is not None:
                 messages = [m for m in messages if m["timestamp"] >= cutoff_ts]
             if before_ts is not None:

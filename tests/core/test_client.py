@@ -1,5 +1,6 @@
 """Tests for core/client.py."""
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -253,3 +254,31 @@ class TestZulipClientWrapper:
             assert summary["total_messages"] == 3
             assert summary["top_senders"]["User1"] == 2
             assert summary["streams"]["general"]["topics"]["Topic1"] == 2
+
+    def test_get_messages_from_stream_avoids_anchor_date(
+        self, mock_config_manager, mock_zulip_client
+    ):
+        """get_messages_from_stream must not send anchor="date".
+
+        anchor="date" needs Zulip 12.0+ (feature level 445). Production runs
+        an older self-hosted server that rejects it with "Invalid anchor" on
+        every call, so this must position via anchor="newest" and filter by
+        timestamp client-side instead.
+        """
+        wrapper = ZulipClientWrapper(config_manager=mock_config_manager)
+        recent_ts = time.time()
+
+        def get_messages(request: dict) -> dict:
+            if request.get("anchor") == "date":
+                return {"result": "error", "msg": "Invalid anchor"}
+            return {
+                "result": "success",
+                "messages": [{"id": 1, "timestamp": recent_ts, "content": "hi"}],
+            }
+
+        mock_zulip_client.get_messages.side_effect = get_messages
+
+        result = wrapper.get_messages_from_stream(stream_name="general", hours_back=1)
+
+        assert result["result"] == "success"
+        assert len(result["messages"]) == 1
