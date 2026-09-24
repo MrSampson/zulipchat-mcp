@@ -32,6 +32,12 @@ except ImportError:
 
 from .utils.logging import get_logger, setup_structured_logging
 
+# Standard OIDC scopes needed to identify the logged-in user (sub/name/email
+# claims). Without an explicit scope request, OAuthProxy omits the `scope`
+# parameter entirely, and providers that require the client to declare it
+# (no default_scopes fallback) reject the authorize request outright.
+OIDC_REQUIRED_SCOPES = ["openid", "profile", "email"]
+
 
 def _build_server_lifespan(config_manager: ConfigManager, enable_listener: bool) -> Any:
     """Build a FastMCP lifespan for ZulipChat background services."""
@@ -252,6 +258,7 @@ def main() -> None:
                     client_secret=args.oidc_client_secret,
                     issuer_url=args.public_url,
                     base_url=args.public_url,
+                    required_scopes=OIDC_REQUIRED_SCOPES,
                 )
                 logger.info("HTTP transport: GitLab OAuth login enabled")
 
