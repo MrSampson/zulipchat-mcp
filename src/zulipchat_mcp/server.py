@@ -263,7 +263,13 @@ def main() -> None:
                 logger.info("HTTP transport: GitLab OAuth login enabled")
 
         if oidc_server is not None or verifiers:
-            auth = MultiAuth(server=oidc_server, verifiers=verifiers)
+            # required_scopes=[]: MultiAuth otherwise defaults its OWN
+            # required_scopes to oidc_server.required_scopes, turning the
+            # scope OIDCProxy needs to request from the upstream IdP into a
+            # floor enforced on every request through MultiAuth — including
+            # ones authenticated by the separate service-token verifier,
+            # whose tokens intentionally carry no scopes at all.
+            auth = MultiAuth(server=oidc_server, verifiers=verifiers, required_scopes=[])
         elif args.host not in ("127.0.0.1", "localhost", "::1"):
             logger.warning(
                 "HTTP transport binding to %s WITHOUT auth configured - any "
