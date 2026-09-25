@@ -213,6 +213,7 @@ def test_http_transport_with_service_token_configures_multiauth():
     assert auth.server is None
     assert len(auth.verifiers) == 1
     assert "secret-token" in auth.verifiers[0].tokens
+    assert auth.required_scopes == []
 
 
 def test_http_transport_with_oidc_configures_multiauth_server():
@@ -273,6 +274,59 @@ def test_http_transport_with_oidc_configures_multiauth_server():
     # parameter from the upstream authorize redirect entirely, and providers
     # with no default_scopes fallback reject the request as invalid.
     assert oidc_kwargs["required_scopes"] == ["openid", "profile", "email"]
+
+    # MultiAuth defaults its OWN required_scopes to server.required_scopes
+    # when not given explicitly, which would turn the scope OIDCProxy needs
+    # for the upstream IdP into a floor enforced on every request. Regression
+    # test: this silently broke the separate service-token verifier (whose
+    # tokens intentionally carry no scopes) the one time this wasn't pinned.
+    assert auth.required_scopes == []
+
+
+def test_http_transport_with_oidc_and_service_token_does_not_scope_gate_service_token():
+    """The service token's scopeless tokens must not be floor-checked against OIDC's scopes."""
+    cfg = MagicMock()
+    cfg.validate_config.return_value = True
+    mcp = MagicMock()
+    fake_oidc_server = MagicMock()
+    fake_oidc_server.required_scopes = ["openid", "profile", "email"]
+
+    with (
+        patch("src.zulipchat_mcp.server.setup_structured_logging"),
+        patch("src.zulipchat_mcp.server.get_logger", return_value=MagicMock()),
+        patch("src.zulipchat_mcp.server.init_config_manager", return_value=cfg),
+        patch("src.zulipchat_mcp.server.init_database"),
+        patch("src.zulipchat_mcp.server.FastMCP", return_value=mcp) as mock_fastmcp,
+        patch("src.zulipchat_mcp.server.register_core_tools"),
+        patch(
+            "fastmcp.server.auth.OIDCProxy", return_value=fake_oidc_server
+        ),
+        patch.object(
+            sys,
+            "argv",
+            [
+                "zulipchat-mcp",
+                "--transport",
+                "http",
+                "--service-token",
+                "secret-token",
+                "--oidc-client-id",
+                "test-client-id",
+                "--oidc-client-secret",
+                "test-secret",
+                "--oidc-issuer",
+                "https://gitlab.example.com",
+                "--public-url",
+                "https://your-mcp-server.example.com",
+            ],
+        ),
+    ):
+        server.main()
+
+    auth = mock_fastmcp.call_args.kwargs["auth"]
+    assert auth.server is fake_oidc_server
+    assert len(auth.verifiers) == 1
+    assert auth.required_scopes == []
 
 
 def test_http_transport_oidc_without_public_url_errors_and_skips_oidc():
