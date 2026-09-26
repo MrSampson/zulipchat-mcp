@@ -47,6 +47,8 @@ class UserNotFoundError(Exception):
 
 
 _MAX_BACKWARD_PAGES = 10
+_MIN_LIMIT = 1
+_MAX_LIMIT = 1000
 
 
 def _in_window(ts: float, cutoff_ts: float | None, before_ts: float | None) -> bool:
@@ -319,6 +321,21 @@ async def search_messages(
     sort_by: Literal["newest", "oldest", "relevance"] = "relevance",
 ) -> dict[str, Any]:
     """Advanced search with fuzzy user resolution and comprehensive filtering."""
+    if limit < _MIN_LIMIT or limit > _MAX_LIMIT:
+        return {
+            "status": "error",
+            "error": {
+                "code": "INVALID_LIMIT",
+                "message": (
+                    f"limit must be between {_MIN_LIMIT} and {_MAX_LIMIT}, "
+                    f"got {limit}"
+                ),
+                "suggestions": [
+                    f"Use a limit between {_MIN_LIMIT} and {_MAX_LIMIT}"
+                ],
+            },
+        }
+
     client = get_client()
 
     try:

@@ -9,6 +9,8 @@ import pytest
 
 from src.zulipchat_mcp.tools.search import (
     _MAX_BACKWARD_PAGES,
+    _MAX_LIMIT,
+    _MIN_LIMIT,
     AmbiguousUserError,
     UserNotFoundError,
     advanced_search,
@@ -165,6 +167,48 @@ class TestSearchTools:
         args = mock_deps.get_messages_raw.call_args[1]
         narrow = args["narrow"]
         assert {"operator": "search", "operand": "hello"} in narrow
+
+    @pytest.mark.asyncio
+    async def test_search_messages_rejects_limit_too_high(self, mock_deps):
+        """A `limit` above the sane upper bound must be rejected before any
+        upstream fetch happens, not silently drive a huge backward walk."""
+        result = await search_messages(stream="test-stream", limit=_MAX_LIMIT + 1)
+
+        assert result["status"] == "error"
+        assert result["error"]["code"] == "INVALID_LIMIT"
+        assert mock_deps.get_messages_raw.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_search_messages_rejects_zero_limit(self, mock_deps):
+        """limit=0 must be rejected, not silently return the whole fetched
+        page (messages[-0:] returns everything, not nothing)."""
+        result = await search_messages(stream="test-stream", limit=0)
+
+        assert result["status"] == "error"
+        assert result["error"]["code"] == "INVALID_LIMIT"
+        assert mock_deps.get_messages_raw.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_search_messages_rejects_negative_limit(self, mock_deps):
+        result = await search_messages(stream="test-stream", limit=-5)
+
+        assert result["status"] == "error"
+        assert result["error"]["code"] == "INVALID_LIMIT"
+        assert mock_deps.get_messages_raw.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_search_messages_accepts_boundary_limits(self, mock_deps):
+        """The boundary values themselves must still succeed (not an
+        off-by-one rejection)."""
+        mock_deps.get_messages_raw.return_value = {
+            "result": "success",
+            "messages": [],
+            "anchor": 1,
+        }
+
+        for boundary in (_MIN_LIMIT, _MAX_LIMIT):
+            result = await search_messages(stream="test-stream", limit=boundary)
+            assert result["status"] == "success"
 
     @pytest.mark.asyncio
     async def test_time_filter_post_fetch(self, mock_deps):
