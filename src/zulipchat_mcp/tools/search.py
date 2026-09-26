@@ -55,13 +55,14 @@ def _in_window(ts: float, cutoff_ts: float | None, before_ts: float | None) -> b
     )
 
 
-def _fetch_messages_until_cutoff(
+def _walk_messages_for_window(
     client: ZulipClientWrapper,
     narrow: list[dict[str, Any]],
     page_size: int,
+    *,
+    min_matches: int | None,
     cutoff_ts: float | None = None,
     before_ts: float | None = None,
-    min_matches: int | None = 0,
     max_pages: int = _MAX_BACKWARD_PAGES,
 ) -> dict[str, Any]:
     """Walk backward via message-ID anchor to cover a time-bounded window.
@@ -79,21 +80,26 @@ def _fetch_messages_until_cutoff(
     `min_matches=None` when the caller needs the whole window regardless of
     count, e.g. sort_by="oldest"); a page's oldest message crosses
     `cutoff_ts` (if set); a page comes back shorter than `page_size` (the
-    narrow's history is exhausted); or `max_pages` is hit.
+    narrow's history is exhausted); or `max_pages` is hit. There's no
+    sensible default for `min_matches` - a caller that means "no floor" must
+    say so with `None`, not silently get it from a default of 0, which
+    would stop the walk after the very first page.
 
-    Returns {"result": "success", "messages": [...], "window_complete":
-    bool} - `window_complete` is False when the cap was hit before any of
-    the other stop conditions confirmed the result is exact, or when a
-    later page failed and only partial results could be returned - or the
-    raw error dict from the first failing page.
+    Returns {"result": "success", "messages": [...], "anchor": Any,
+    "window_complete": bool} - `anchor` echoes the first page's, matching a
+    single-fetch response; `window_complete` is False when the cap was hit
+    before any of the other stop conditions confirmed the result is exact,
+    or when a later page failed and only partial results could be returned
+    - or the raw error dict from the first failing page.
     """
     anchor: str | int = "newest"
     include_anchor: bool = True
     messages: list[dict[str, Any]] = []
     window_complete: bool = False
     matches_in_window: int = 0
+    first_page_anchor: Any = None
 
-    for _ in range(max_pages):
+    for page_num in range(max_pages):
         result: dict[str, Any] = client.get_messages_raw(
             anchor=anchor,
             narrow=narrow,
@@ -108,6 +114,9 @@ def _fetch_messages_until_cutoff(
                 return result
             break
 
+        if page_num == 0:
+            first_page_anchor = result.get("anchor")
+
         page_messages: list[dict[str, Any]] = result.get("messages", [])
         if not page_messages:
             window_complete = True
@@ -121,10 +130,8 @@ def _fetch_messages_until_cutoff(
 
         crossed_cutoff: bool = cutoff_ts is not None and oldest["timestamp"] < cutoff_ts
         enough: bool = min_matches is not None and matches_in_window >= min_matches
-        if crossed_cutoff or enough:
-            window_complete = True
-            break
-        if len(page_messages) < page_size:
+        exhausted: bool = len(page_messages) < page_size
+        if crossed_cutoff or enough or exhausted:
             window_complete = True
             break
 
@@ -134,6 +141,7 @@ def _fetch_messages_until_cutoff(
     return {
         "result": "success",
         "messages": messages,
+        "anchor": first_page_anchor,
         "window_complete": window_complete,
     }
 
@@ -439,7 +447,7 @@ async def search_messages(
 
         # Execute search
         if anchor == "newest" and time_filtered:
-            result = _fetch_messages_until_cutoff(
+            result = _walk_messages_for_window(
                 client=client,
                 narrow=cast(list[dict[str, Any]], narrow),
                 page_size=num_before,

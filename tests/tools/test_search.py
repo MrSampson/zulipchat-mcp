@@ -347,6 +347,42 @@ class TestSearchTools:
         assert ids == [1, 2, 3, 4, 5]
 
     @pytest.mark.asyncio
+    async def test_both_bounds_stop_early_on_enough_matches_not_history(
+        self, mock_deps
+    ):
+        """With both a lower and upper time bound set, and more in-window
+        matches than `limit`, the walk must stop as soon as it has enough -
+        not walk all the way to the cutoff or the narrow's history - and
+        the trim afterward must keep the newest `limit` of those matches,
+        not just whichever `limit` happened to be collected first.
+        """
+        now: datetime = datetime.now()
+        # 100 hourly messages, ids ascending with age: id i is (99-i) hours
+        # old. after_time=90h ago and before_time=30h ago bound a window of
+        # ids 9..69 (61 messages) - far more than limit*2 per page.
+        all_messages: list[dict[str, Any]] = [
+            _message(i, (now - timedelta(hours=99 - i)).timestamp()) for i in range(100)
+        ]
+        mock_deps.get_messages_raw.side_effect = _paginated_get_messages_raw(
+            all_messages
+        )
+
+        result = await search_messages(
+            stream="test-stream",
+            after_time=(now - timedelta(hours=90)).isoformat(),
+            before_time=(now - timedelta(hours=30)).isoformat(),
+            limit=5,
+        )
+
+        assert result["status"] == "success"
+        assert result["window_complete"] is True
+        # Stopped on "enough matches", not by exhausting the narrow's
+        # history (100 messages at page_size=10 would take 10 calls).
+        assert mock_deps.get_messages_raw.call_count < 10
+        ids = sorted(m["id"] for m in result["messages"])
+        assert ids == [65, 66, 67, 68, 69]
+
+    @pytest.mark.asyncio
     async def test_cutoff_only_search_needs_single_page_when_it_covers_limit(
         self, mock_deps
     ):
