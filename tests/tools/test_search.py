@@ -254,6 +254,22 @@ class TestSearchTools:
         )
 
     @pytest.mark.asyncio
+    async def test_resolve_user_identifier_runs_get_users_off_event_loop(
+        self, mock_client
+    ):
+        """resolve_user_identifier's client.get_users() calls (the
+        exact-email check and the fuzzy-match fetch) are blocking network
+        calls and must be dispatched through asyncio.to_thread, same as
+        search_messages's fetch calls."""
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            await resolve_user_identifier("Test User", mock_client)
+
+        assert any(
+            call.args and call.args[0] is mock_client.get_users
+            for call in mock_to_thread.call_args_list
+        )
+
+    @pytest.mark.asyncio
     async def test_time_filter_post_fetch(self, mock_deps):
         """Test that time filtering happens after fetch (Bug Regression).
 
@@ -830,6 +846,35 @@ class TestSearchTools:
         assert result["error"]["code"] == "INVALID_LIMIT"
         assert mock_deps.get_messages_raw.call_count == 0
         assert mock_deps.get_users.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_advanced_search_runs_get_users_off_event_loop(self, mock_deps):
+        """advanced_search's client.get_users() call (search_type=["users"])
+        is a blocking network call and must be dispatched through
+        asyncio.to_thread instead of running inline on the event loop."""
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            result = await advanced_search(query="test", search_type=["users"])
+
+        assert result["status"] == "success"
+        assert any(
+            call.args and call.args[0] is mock_deps.get_users
+            for call in mock_to_thread.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_advanced_search_runs_get_streams_off_event_loop(self, mock_deps):
+        """advanced_search's client.get_streams() call
+        (search_type=["streams"]) is a blocking network call and must be
+        dispatched through asyncio.to_thread instead of running inline on
+        the event loop."""
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            result = await advanced_search(query="test", search_type=["streams"])
+
+        assert result["status"] == "success"
+        assert any(
+            call.args and call.args[0] is mock_deps.get_streams
+            for call in mock_to_thread.call_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_construct_narrow(self):
