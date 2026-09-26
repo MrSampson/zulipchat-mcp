@@ -260,14 +260,19 @@ class TestSearchTools:
         """resolve_user_identifier's client.get_users() calls (the
         exact-email check and the fuzzy-match fetch) are blocking network
         calls and must be dispatched through asyncio.to_thread, same as
-        search_messages's fetch calls."""
+        search_messages's fetch calls. Uses an "@" identifier with no exact
+        match so both call sites run, and requires every get_users call to
+        be routed - not just the first one found."""
         with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
-            await resolve_user_identifier("Test User", mock_client)
+            with pytest.raises(UserNotFoundError):
+                await resolve_user_identifier("nobody@example.com", mock_client)
 
-        assert any(
-            call.args and call.args[0] is mock_client.get_users
+        routed = sum(
+            1
             for call in mock_to_thread.call_args_list
+            if call.args and call.args[0] is mock_client.get_users
         )
+        assert routed == mock_client.get_users.call_count >= 1
 
     @pytest.mark.asyncio
     async def test_time_filter_post_fetch(self, mock_deps):
