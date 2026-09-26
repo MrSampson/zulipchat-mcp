@@ -46,6 +46,106 @@ class UserNotFoundError(Exception):
         super().__init__(f"No user matching '{identifier}'")
 
 
+_MAX_BACKWARD_PAGES = 10
+
+
+def _in_window(ts: float, cutoff_ts: float | None, before_ts: float | None) -> bool:
+    return (cutoff_ts is None or ts >= cutoff_ts) and (
+        before_ts is None or ts <= before_ts
+    )
+
+
+def _walk_messages_for_window(
+    client: ZulipClientWrapper,
+    narrow: list[dict[str, Any]],
+    page_size: int,
+    *,
+    min_matches: int | None,
+    cutoff_ts: float | None = None,
+    before_ts: float | None = None,
+    max_pages: int = _MAX_BACKWARD_PAGES,
+) -> dict[str, Any]:
+    """Walk backward via message-ID anchor to cover a time-bounded window.
+
+    A single anchor="newest" fetch only ever reaches the newest `page_size`
+    messages. If a caller also narrows the top end with `before_time`, and
+    more than `page_size` messages have landed since then, the actual
+    target window sits entirely behind that wall and a single fetch returns
+    nothing - not because the messages don't exist, but because the anchor
+    never moves. Walking backward, using each page's oldest message id as
+    the next anchor, reaches past that wall.
+
+    Stops as soon as any of these holds: `min_matches` is not None and that
+    many collected messages fall within [`cutoff_ts`, `before_ts`] (pass
+    `min_matches=None` when the caller needs the whole window regardless of
+    count, e.g. sort_by="oldest"); a page's oldest message crosses
+    `cutoff_ts` (if set); a page comes back shorter than `page_size` (the
+    narrow's history is exhausted); or `max_pages` is hit. There's no
+    sensible default for `min_matches` - a caller that means "no floor" must
+    say so with `None`, not silently get it from a default of 0, which
+    would stop the walk after the very first page.
+
+    Returns {"result": "success", "messages": [...], "anchor": Any,
+    "window_complete": bool} - `anchor` echoes the first page's, matching a
+    single-fetch response; `window_complete` is False when the cap was hit
+    before any of the other stop conditions confirmed the result is exact,
+    or when a later page failed and only partial results could be returned
+    - or the raw error dict from the first failing page.
+    """
+    anchor: str | int = "newest"
+    include_anchor: bool = True
+    messages: list[dict[str, Any]] = []
+    window_complete: bool = False
+    matches_in_window: int = 0
+    first_page_anchor: Any = None
+
+    for page_num in range(max_pages):
+        result: dict[str, Any] = client.get_messages_raw(
+            anchor=anchor,
+            narrow=narrow,
+            num_before=page_size,
+            num_after=0,
+            include_anchor=include_anchor,
+            client_gravatar=True,
+            apply_markdown=True,
+        )
+        if result.get("result") != "success":
+            if not messages:
+                return result
+            break
+
+        if page_num == 0:
+            first_page_anchor = result.get("anchor")
+
+        page_messages: list[dict[str, Any]] = result.get("messages", [])
+        if not page_messages:
+            window_complete = True
+            break
+
+        messages = page_messages + messages
+        matches_in_window += sum(
+            1 for m in page_messages if _in_window(m["timestamp"], cutoff_ts, before_ts)
+        )
+        oldest: dict[str, Any] = page_messages[0]
+
+        crossed_cutoff: bool = cutoff_ts is not None and oldest["timestamp"] < cutoff_ts
+        enough: bool = min_matches is not None and matches_in_window >= min_matches
+        exhausted: bool = len(page_messages) < page_size
+        if crossed_cutoff or enough or exhausted:
+            window_complete = True
+            break
+
+        anchor = oldest["id"]
+        include_anchor = False
+
+    return {
+        "result": "success",
+        "messages": messages,
+        "anchor": first_page_anchor,
+        "window_complete": window_complete,
+    }
+
+
 async def resolve_user_identifier(
     identifier: str, client: ZulipClientWrapper
 ) -> dict[str, Any]:
@@ -321,8 +421,6 @@ async def search_messages(
 
             if cutoff:
                 cutoff_ts = cutoff.timestamp()
-                num_before = limit * 2  # Fetch extra to account for filtering
-                num_after = 0
 
         if before_time:
             bt = (
@@ -331,6 +429,10 @@ async def search_messages(
                 else datetime.fromisoformat(str(before_time))
             )
             before_ts = bt.timestamp()
+
+        time_filtered: bool = cutoff_ts is not None or before_ts is not None
+        if time_filtered:
+            num_before = limit * 2  # Fetch extra to account for filtering
 
         if sort_by == "oldest" and cutoff_ts is None:
             # Fetching the true oldest messages via anchor="oldest" only
@@ -344,15 +446,29 @@ async def search_messages(
             num_after = limit
 
         # Execute search
-        result = client.get_messages_raw(
-            anchor=anchor,
-            narrow=cast(list[dict[str, Any]], narrow),
-            num_before=num_before,
-            num_after=num_after,
-            include_anchor=True,
-            client_gravatar=True,
-            apply_markdown=True,
-        )
+        if anchor == "newest" and time_filtered:
+            result = _walk_messages_for_window(
+                client=client,
+                narrow=cast(list[dict[str, Any]], narrow),
+                page_size=num_before,
+                cutoff_ts=cutoff_ts,
+                before_ts=before_ts,
+                # sort_by="oldest" needs the whole window regardless of how
+                # many matches turn up early, since the earliest-collected
+                # messages while walking backward are the most recent ones,
+                # not the oldest.
+                min_matches=None if sort_by == "oldest" else limit,
+            )
+        else:
+            result = client.get_messages_raw(
+                anchor=anchor,
+                narrow=cast(list[dict[str, Any]], narrow),
+                num_before=num_before,
+                num_after=num_after,
+                include_anchor=True,
+                client_gravatar=True,
+                apply_markdown=True,
+            )
 
         if result.get("result") == "success":
             messages = result.get("messages", [])
@@ -401,6 +517,7 @@ async def search_messages(
                 "anchor": result.get("anchor"),
                 "narrow_applied": narrow,
                 "sort_by": sort_by,
+                "window_complete": result.get("window_complete", True),
             }
         else:
             return {"status": "error", "error": result.get("msg", "Search failed")}
