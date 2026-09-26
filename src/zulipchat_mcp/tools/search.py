@@ -4,6 +4,7 @@ Core search operations: search messages, advanced search, narrow construction.
 Analytics moved to ai_analytics.py for LLM elicitation.
 """
 
+import asyncio
 from collections import Counter
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
@@ -47,6 +48,28 @@ class UserNotFoundError(Exception):
 
 
 _MAX_BACKWARD_PAGES = 10
+_MIN_LIMIT = 1
+_MAX_LIMIT = 1000
+# Floor for the whole-window backward walk's page size (see its use in
+# search_messages) - a separate policy from _MAX_LIMIT, so raising the
+# user-facing limit cap doesn't silently change how big a page the walk
+# fetches.
+_WHOLE_WINDOW_PAGE_SIZE = 1000
+
+
+def _invalid_limit_error(limit: int) -> dict[str, Any] | None:
+    """Structured INVALID_LIMIT error for an out-of-range `limit`, or None
+    when `limit` is within [_MIN_LIMIT, _MAX_LIMIT]."""
+    if _MIN_LIMIT <= limit <= _MAX_LIMIT:
+        return None
+    return {
+        "status": "error",
+        "error": {
+            "code": "INVALID_LIMIT",
+            "message": f"limit must be between {_MIN_LIMIT} and {_MAX_LIMIT}, got {limit}",
+            "suggestions": [f"Use a limit between {_MIN_LIMIT} and {_MAX_LIMIT}"],
+        },
+    }
 
 
 def _in_window(ts: float, cutoff_ts: float | None, before_ts: float | None) -> bool:
@@ -319,6 +342,10 @@ async def search_messages(
     sort_by: Literal["newest", "oldest", "relevance"] = "relevance",
 ) -> dict[str, Any]:
     """Advanced search with fuzzy user resolution and comprehensive filtering."""
+    invalid_limit = _invalid_limit_error(limit)
+    if invalid_limit is not None:
+        return invalid_limit
+
     client = get_client()
 
     try:
@@ -445,12 +472,28 @@ async def search_messages(
             num_before = 0
             num_after = limit
 
-        # Execute search
+        # Execute search. Both branches call the (synchronous) Zulip client
+        # over the network, so both are dispatched through asyncio.to_thread
+        # to keep a slow upstream round-trip from blocking the event loop -
+        # the walk branch in particular can make up to _MAX_BACKWARD_PAGES
+        # sequential calls.
         if anchor == "newest" and time_filtered:
-            result = _walk_messages_for_window(
+            # sort_by="oldest" here always means the whole-window walk
+            # (min_matches=None below) - the no-cutoff case is redirected
+            # to anchor="oldest" earlier and never reaches this branch. Its
+            # page size ignores `limit` too, so a small `limit` with a wide
+            # cutoff doesn't exhaust _MAX_BACKWARD_PAGES before the window
+            # actually closes.
+            page_size: int = (
+                max(num_before, _WHOLE_WINDOW_PAGE_SIZE)
+                if sort_by == "oldest"
+                else num_before
+            )
+            result = await asyncio.to_thread(
+                _walk_messages_for_window,
                 client=client,
                 narrow=cast(list[dict[str, Any]], narrow),
-                page_size=num_before,
+                page_size=page_size,
                 cutoff_ts=cutoff_ts,
                 before_ts=before_ts,
                 # sort_by="oldest" needs the whole window regardless of how
@@ -460,7 +503,8 @@ async def search_messages(
                 min_matches=None if sort_by == "oldest" else limit,
             )
         else:
-            result = client.get_messages_raw(
+            result = await asyncio.to_thread(
+                client.get_messages_raw,
                 anchor=anchor,
                 narrow=cast(list[dict[str, Any]], narrow),
                 num_before=num_before,
@@ -547,6 +591,10 @@ async def advanced_search(
     aggregations: list[str] | None = None,
 ) -> dict[str, Any]:
     """Multi-faceted search with basic aggregations."""
+    invalid_limit = _invalid_limit_error(limit)
+    if invalid_limit is not None:
+        return invalid_limit
+
     client = get_client()
 
     search_type = search_type or ["messages"]

@@ -1,5 +1,6 @@
 """Tests for tools/search.py."""
 
+import asyncio
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -9,8 +10,12 @@ import pytest
 
 from src.zulipchat_mcp.tools.search import (
     _MAX_BACKWARD_PAGES,
+    _MAX_LIMIT,
+    _MIN_LIMIT,
+    _WHOLE_WINDOW_PAGE_SIZE,
     AmbiguousUserError,
     UserNotFoundError,
+    _walk_messages_for_window,
     advanced_search,
     check_messages_match_narrow,
     construct_narrow,
@@ -50,6 +55,17 @@ def _paginated_get_messages_raw(
         return {"result": "success", "messages": page}
 
     return get_messages_raw
+
+
+def _full_page_in_window(now: datetime, num_before: int) -> list[dict[str, Any]]:
+    """A page of exactly `num_before` messages, all landing within a
+    typical cutoff window - simulates a backward-walk page that never
+    looks "exhausted" (shorter than requested) or crosses the cutoff,
+    regardless of how large a page is requested."""
+    return [
+        _message(i, (now - timedelta(seconds=num_before - i)).timestamp())
+        for i in range(num_before)
+    ]
 
 
 def _noise_wall(now: datetime) -> list[dict[str, Any]]:
@@ -165,6 +181,77 @@ class TestSearchTools:
         args = mock_deps.get_messages_raw.call_args[1]
         narrow = args["narrow"]
         assert {"operator": "search", "operand": "hello"} in narrow
+
+    @pytest.mark.parametrize(
+        "limit",
+        [_MIN_LIMIT - 1, -5, _MAX_LIMIT + 1],
+        ids=["zero", "negative", "too_high"],
+    )
+    @pytest.mark.asyncio
+    async def test_search_messages_rejects_out_of_range_limit(self, mock_deps, limit):
+        """An out-of-range `limit` must be rejected before any upstream
+        fetch happens - not silently drive a huge backward walk (too high),
+        and not silently return the whole fetched page for limit<=0, since
+        messages[-0:] returns everything, not nothing."""
+        result = await search_messages(stream="test-stream", limit=limit)
+
+        assert result["status"] == "error"
+        assert result["error"]["code"] == "INVALID_LIMIT"
+        assert mock_deps.get_messages_raw.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_search_messages_accepts_boundary_limits(self, mock_deps):
+        """The boundary values themselves must still succeed (not an
+        off-by-one rejection)."""
+        mock_deps.get_messages_raw.return_value = {
+            "result": "success",
+            "messages": [],
+            "anchor": 1,
+        }
+
+        for boundary in (_MIN_LIMIT, _MAX_LIMIT):
+            result = await search_messages(stream="test-stream", limit=boundary)
+            assert result["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_search_messages_runs_direct_fetch_off_event_loop(self, mock_deps):
+        """The single-fetch path (no time filter) must dispatch the
+        blocking client.get_messages_raw call through asyncio.to_thread
+        instead of calling it inline on the event loop."""
+        mock_deps.get_messages_raw.return_value = {
+            "result": "success",
+            "messages": [],
+            "anchor": 1,
+        }
+
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            result = await search_messages(stream="test-stream")
+
+        assert result["status"] == "success"
+        assert any(
+            call.args and call.args[0] is mock_deps.get_messages_raw
+            for call in mock_to_thread.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_search_messages_runs_window_walk_off_event_loop(self, mock_deps):
+        """The time-filtered backward-walk path must dispatch
+        _walk_messages_for_window through asyncio.to_thread instead of
+        running its (possibly many) blocking calls inline."""
+        mock_deps.get_messages_raw.return_value = {
+            "result": "success",
+            "messages": [],
+            "anchor": 1,
+        }
+
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            result = await search_messages(stream="test-stream", last_hours=1)
+
+        assert result["status"] == "success"
+        assert any(
+            call.args and call.args[0] is _walk_messages_for_window
+            for call in mock_to_thread.call_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_time_filter_post_fetch(self, mock_deps):
@@ -416,6 +503,55 @@ class TestSearchTools:
         assert ids == list(range(950, 1000))
 
     @pytest.mark.asyncio
+    async def test_time_filter_oldest_sort_whole_window_page_size_independent_of_limit(
+        self, mock_deps
+    ):
+        """A small `limit` with sort_by="oldest" must not force the
+        whole-window walk into limit*2-sized pages - doing so risks
+        exhausting _MAX_BACKWARD_PAGES before the window closes, when a
+        single larger page would have covered it in one round-trip."""
+        now: datetime = datetime.now()
+        all_messages: list[dict[str, Any]] = [
+            _message(i, (now - timedelta(minutes=50 - i)).timestamp())
+            for i in range(50)
+        ]
+        mock_deps.get_messages_raw.side_effect = _paginated_get_messages_raw(
+            all_messages
+        )
+
+        result = await search_messages(
+            stream="test-stream", last_hours=1, limit=2, sort_by="oldest"
+        )
+
+        assert result["status"] == "success"
+        assert result["window_complete"] is True
+        assert mock_deps.get_messages_raw.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_time_filter_oldest_sort_uses_limit_times_two_above_floor(
+        self, mock_deps
+    ):
+        """When `limit * 2` already exceeds the whole-window page-size
+        floor, the walk's page size must be `limit * 2`, not the floor -
+        pins that it's `max(limit * 2, floor)`, not a fixed page size."""
+        now: datetime = datetime.now()
+        all_messages: list[dict[str, Any]] = [
+            _message(0, (now - timedelta(seconds=1)).timestamp())
+        ]
+        mock_deps.get_messages_raw.side_effect = _paginated_get_messages_raw(
+            all_messages
+        )
+
+        result = await search_messages(
+            stream="test-stream", last_hours=1, limit=_MAX_LIMIT, sort_by="oldest"
+        )
+
+        assert result["status"] == "success"
+        assert mock_deps.get_messages_raw.call_args.kwargs["num_before"] == (
+            _MAX_LIMIT * 2
+        )
+
+    @pytest.mark.asyncio
     async def test_time_filter_oldest_sort_spans_pages(self, mock_deps):
         """sort_by="oldest" with a cutoff spanning more than one page must
         return the narrow's true oldest-in-window messages, not just the
@@ -425,12 +561,16 @@ class TestSearchTools:
         has `limit` matches - the earliest messages collected while
         walking backward are the most recent ones, not the oldest - so it
         must walk until the cutoff is reached or the narrow's history
-        runs out.
+        runs out. Uses more than _WHOLE_WINDOW_PAGE_SIZE messages so a
+        single page (sized independently of `limit` - see the whole-window
+        page-size test) still can't cover the whole window in one
+        round-trip.
         """
         now: datetime = datetime.now()
+        message_count: int = _WHOLE_WINDOW_PAGE_SIZE + 5
         all_messages: list[dict[str, Any]] = [
-            _message(i, (now - timedelta(minutes=10 - i)).timestamp())
-            for i in range(10)
+            _message(i, (now - timedelta(seconds=message_count - i)).timestamp())
+            for i in range(message_count)
         ]
         mock_deps.get_messages_raw.side_effect = _paginated_get_messages_raw(
             all_messages
@@ -470,17 +610,26 @@ class TestSearchTools:
 
         Uses sort_by="oldest" so the walk can't stop early just because the
         first page already has enough matches for `limit` - it must always
-        attempt a second page here, which is what fails.
+        attempt a second page here, which is what fails. The first page
+        returns exactly the requested page_size worth of messages (all
+        within the cutoff window) so it doesn't look "exhausted" - the
+        whole-window walk's page_size is decoupled from `limit` (see the
+        whole-window page-size test), so this can't be a small fixed page
+        anymore.
         """
         now: datetime = datetime.now()
-        first_page: list[dict[str, Any]] = [
-            _message(1, (now - timedelta(minutes=1)).timestamp()),
-            _message(2, (now - timedelta(minutes=0)).timestamp()),
-        ]
-        mock_deps.get_messages_raw.side_effect = [
-            {"result": "success", "messages": first_page},
-            {"result": "error", "msg": "Bad request"},
-        ]
+        call_count: int = 0
+
+        def get_messages_raw(**kwargs: object) -> dict[str, object]:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                num_before: int = cast(int, kwargs["num_before"])
+                page: list[dict[str, Any]] = _full_page_in_window(now, num_before)
+                return {"result": "success", "messages": page}
+            return {"result": "error", "msg": "Bad request"}
+
+        mock_deps.get_messages_raw.side_effect = get_messages_raw
 
         result = await search_messages(
             stream="test-stream", last_hours=1, limit=1, sort_by="oldest"
@@ -497,17 +646,21 @@ class TestSearchTools:
         looping forever, and must say so via window_complete.
 
         Uses sort_by="oldest" so the walk can't stop early on match count -
-        only the cap can end it here, since the mock never shrinks or
-        crosses the cutoff regardless of how many pages are requested.
+        only the cap can end it here. The mock always returns exactly the
+        requested page_size worth of messages, all within the cutoff
+        window, so it never looks "exhausted" or crosses the cutoff
+        regardless of how large a page is requested (the whole-window
+        walk's page_size is decoupled from `limit` - see the whole-window
+        page-size test - so a small fixed page can no longer force this).
         """
         now: datetime = datetime.now()
-        page: list[dict[str, Any]] = [
-            _message(i, (now - timedelta(minutes=i)).timestamp()) for i in range(4)
-        ]
-        mock_deps.get_messages_raw.return_value = {
-            "result": "success",
-            "messages": page,
-        }
+
+        def get_messages_raw(**kwargs: object) -> dict[str, object]:
+            num_before: int = cast(int, kwargs["num_before"])
+            page: list[dict[str, Any]] = _full_page_in_window(now, num_before)
+            return {"result": "success", "messages": page}
+
+        mock_deps.get_messages_raw.side_effect = get_messages_raw
 
         result = await search_messages(
             stream="test-stream", last_hours=1, limit=2, sort_by="oldest"
@@ -662,6 +815,21 @@ class TestSearchTools:
         assert agg["count_by_user"]["U1"] == 2
         assert agg["count_by_user"]["U2"] == 1
         assert agg["count_by_stream"]["s1"] == 2
+
+    @pytest.mark.asyncio
+    async def test_advanced_search_rejects_out_of_range_limit(self, mock_deps):
+        """advanced_search must reject an out-of-range `limit` at the top
+        level, not report top-level success with the error buried inside
+        results["messages"] while users/streams are still sliced with the
+        unchecked value."""
+        result = await advanced_search(
+            query="test", search_type=["messages", "users"], limit=0
+        )
+
+        assert result["status"] == "error"
+        assert result["error"]["code"] == "INVALID_LIMIT"
+        assert mock_deps.get_messages_raw.call_count == 0
+        assert mock_deps.get_users.call_count == 0
 
     @pytest.mark.asyncio
     async def test_construct_narrow(self):
