@@ -905,3 +905,51 @@ class TestSearchTools:
         assert result["total_checked"] == 2
         assert result["matching_count"] == 1  # Based on mock return {"1": {}}
         assert result["non_matching_count"] == 1
+        mock_deps.client.call_endpoint.assert_called_once_with(
+            "messages/matches_narrow",
+            method="GET",
+            request={
+                "msg_ids": [1, 2],
+                "narrow": [{"operator": "stream", "operand": "general"}],
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_messages_match_narrow_api_error(self, mock_deps):
+        """A non-success response from call_endpoint surfaces as a
+        status=error result with the API's own message."""
+        mock_deps.client.call_endpoint.return_value = {
+            "result": "error",
+            "msg": "bad narrow",
+        }
+
+        result = await check_messages_match_narrow(msg_ids=[1], narrow=[])
+
+        assert result == {"status": "error", "error": "bad narrow"}
+
+    @pytest.mark.asyncio
+    async def test_check_messages_match_narrow_exception_in_thread(self, mock_deps):
+        """An exception raised inside the asyncio.to_thread worker (e.g. a
+        network error from call_endpoint) is caught and reported as
+        status=error rather than propagating."""
+        mock_deps.client.call_endpoint.side_effect = RuntimeError("boom")
+
+        result = await check_messages_match_narrow(msg_ids=[1], narrow=[])
+
+        assert result == {"status": "error", "error": "boom"}
+
+    @pytest.mark.asyncio
+    async def test_check_messages_match_narrow_runs_off_event_loop(self, mock_deps):
+        """check_messages_match_narrow's client.client.call_endpoint() call is
+        a blocking network call and must be dispatched through
+        asyncio.to_thread instead of running inline on the event loop."""
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            result = await check_messages_match_narrow(
+                msg_ids=[1, 2], narrow=[{"operator": "stream", "operand": "general"}]
+            )
+
+        assert result["status"] == "success"
+        assert any(
+            call.args and call.args[0] is mock_deps.client.call_endpoint
+            for call in mock_to_thread.call_args_list
+        )
