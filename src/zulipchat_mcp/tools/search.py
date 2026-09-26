@@ -475,7 +475,7 @@ async def search_messages(
             # otherwise a small `limit` with a wide cutoff pages in
             # limit*2-sized chunks and risks exhausting
             # _MAX_BACKWARD_PAGES before the window actually closes.
-            page_size = (
+            page_size: int = (
                 max(num_before, _MAX_LIMIT) if sort_by == "oldest" else num_before
             )
             result = await asyncio.to_thread(

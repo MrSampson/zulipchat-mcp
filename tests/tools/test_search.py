@@ -537,7 +537,7 @@ class TestSearchTools:
         test) still can't cover the whole window in one round-trip.
         """
         now: datetime = datetime.now()
-        message_count = _MAX_LIMIT + 5
+        message_count: int = _MAX_LIMIT + 5
         all_messages: list[dict[str, Any]] = [
             _message(i, (now - timedelta(seconds=message_count - i)).timestamp())
             for i in range(message_count)
@@ -588,14 +588,14 @@ class TestSearchTools:
         anymore.
         """
         now: datetime = datetime.now()
-        call_count = 0
+        call_count: int = 0
 
         def get_messages_raw(**kwargs: object) -> dict[str, object]:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                num_before = cast(int, kwargs["num_before"])
-                page = [
+                num_before: int = cast(int, kwargs["num_before"])
+                page: list[dict[str, Any]] = [
                     _message(i, (now - timedelta(seconds=num_before - i)).timestamp())
                     for i in range(num_before)
                 ]
@@ -629,8 +629,8 @@ class TestSearchTools:
         now: datetime = datetime.now()
 
         def get_messages_raw(**kwargs: object) -> dict[str, object]:
-            num_before = cast(int, kwargs["num_before"])
-            page = [
+            num_before: int = cast(int, kwargs["num_before"])
+            page: list[dict[str, Any]] = [
                 _message(i, (now - timedelta(seconds=num_before - i)).timestamp())
                 for i in range(num_before)
             ]
