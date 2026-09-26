@@ -330,9 +330,7 @@ async def search_messages(
                     f"limit must be between {_MIN_LIMIT} and {_MAX_LIMIT}, "
                     f"got {limit}"
                 ),
-                "suggestions": [
-                    f"Use a limit between {_MIN_LIMIT} and {_MAX_LIMIT}"
-                ],
+                "suggestions": [f"Use a limit between {_MIN_LIMIT} and {_MAX_LIMIT}"],
             },
         }
 
@@ -464,10 +462,21 @@ async def search_messages(
 
         # Execute search
         if anchor == "newest" and time_filtered:
+            # sort_by="oldest" here always means the whole-window walk
+            # (min_matches=None below) - the no-cutoff "oldest" case is
+            # redirected to anchor="oldest" earlier and never reaches this
+            # branch. That walk needs the narrow's full history regardless
+            # of `limit`, so give it a page size decoupled from `limit` -
+            # otherwise a small `limit` with a wide cutoff pages in
+            # limit*2-sized chunks and risks exhausting
+            # _MAX_BACKWARD_PAGES before the window actually closes.
+            page_size = (
+                max(num_before, _MAX_LIMIT) if sort_by == "oldest" else num_before
+            )
             result = _walk_messages_for_window(
                 client=client,
                 narrow=cast(list[dict[str, Any]], narrow),
-                page_size=num_before,
+                page_size=page_size,
                 cutoff_ts=cutoff_ts,
                 before_ts=before_ts,
                 # sort_by="oldest" needs the whole window regardless of how
