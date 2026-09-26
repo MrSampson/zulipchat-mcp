@@ -52,8 +52,10 @@ _MAX_BACKWARD_PAGES = 10
 def _fetch_messages_until_cutoff(
     client: ZulipClientWrapper,
     narrow: list[dict[str, Any]],
-    cutoff_ts: float,
     page_size: int,
+    cutoff_ts: float | None = None,
+    before_ts: float | None = None,
+    min_matches: int = 0,
     max_pages: int = _MAX_BACKWARD_PAGES,
 ) -> dict[str, Any]:
     """Walk backward via message-ID anchor to cover a time-bounded window.
@@ -66,17 +68,23 @@ def _fetch_messages_until_cutoff(
     never moves. Walking backward, using each page's oldest message id as
     the next anchor, reaches past that wall.
 
-    Stops once a page's oldest message crosses `cutoff_ts`, a page comes
-    back shorter than `page_size` (the narrow's history is exhausted), or
-    `max_pages` is hit. Returns {"result": "success", "messages": [...],
-    "window_complete": bool} - `window_complete` is False when the cap was
-    hit without confirming the whole window was covered - or the raw error
-    dict from the first failing page.
+    With a `cutoff_ts` (from last_hours/last_days/after_time), the walk
+    stops once a page's oldest message crosses it. Without one - a
+    `before_time` filter used alone has no lower bound to walk toward - it
+    instead stops once at least `min_matches` collected messages pass the
+    `before_ts` filter. Either way, it also stops when a page comes back
+    shorter than `page_size` (the narrow's history is exhausted) or
+    `max_pages` is hit.
+
+    Returns {"result": "success", "messages": [...], "window_complete":
+    bool} - `window_complete` is False when the cap was hit without
+    confirming the whole window was covered - or the raw error dict from
+    the first failing page.
     """
     anchor: str | int = "newest"
-    include_anchor = True
+    include_anchor: bool = True
     messages: list[dict[str, Any]] = []
-    window_complete = False
+    window_complete: bool = False
 
     for _ in range(max_pages):
         result = client.get_messages_raw(
@@ -100,7 +108,19 @@ def _fetch_messages_until_cutoff(
 
         messages = page_messages + messages
         oldest = page_messages[0]
-        if oldest.get("timestamp", 0) < cutoff_ts:
+
+        crossed_cutoff = (
+            cutoff_ts is not None and oldest.get("timestamp", 0) < cutoff_ts
+        )
+        enough_matches = (
+            cutoff_ts is None
+            and before_ts is not None
+            and (
+                sum(1 for m in messages if m.get("timestamp", 0) <= before_ts)
+                >= min_matches
+            )
+        )
+        if crossed_cutoff or enough_matches:
             window_complete = True
             break
         if len(page_messages) < page_size:
@@ -392,8 +412,6 @@ async def search_messages(
 
             if cutoff:
                 cutoff_ts = cutoff.timestamp()
-                num_before = limit * 2  # Fetch extra to account for filtering
-                num_after = 0
 
         if before_time:
             bt = (
@@ -402,6 +420,10 @@ async def search_messages(
                 else datetime.fromisoformat(str(before_time))
             )
             before_ts = bt.timestamp()
+
+        if cutoff_ts is not None or before_ts is not None:
+            num_before = limit * 2  # Fetch extra to account for filtering
+            num_after = 0
 
         if sort_by == "oldest" and cutoff_ts is None:
             # Fetching the true oldest messages via anchor="oldest" only
@@ -415,12 +437,14 @@ async def search_messages(
             num_after = limit
 
         # Execute search
-        if cutoff_ts is not None:
+        if anchor == "newest" and (cutoff_ts is not None or before_ts is not None):
             result = _fetch_messages_until_cutoff(
                 client=client,
                 narrow=cast(list[dict[str, Any]], narrow),
-                cutoff_ts=cutoff_ts,
                 page_size=num_before,
+                cutoff_ts=cutoff_ts,
+                before_ts=before_ts,
+                min_matches=limit,
             )
         else:
             result = client.get_messages_raw(
