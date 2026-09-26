@@ -4,6 +4,7 @@ Core search operations: search messages, advanced search, narrow construction.
 Analytics moved to ai_analytics.py for LLM elicitation.
 """
 
+import asyncio
 from collections import Counter
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
@@ -460,7 +461,11 @@ async def search_messages(
             num_before = 0
             num_after = limit
 
-        # Execute search
+        # Execute search. Both branches call the (synchronous) Zulip client
+        # over the network, so both are dispatched through asyncio.to_thread
+        # to keep a slow upstream round-trip from blocking the event loop -
+        # the walk branch in particular can make up to _MAX_BACKWARD_PAGES
+        # sequential calls.
         if anchor == "newest" and time_filtered:
             # sort_by="oldest" here always means the whole-window walk
             # (min_matches=None below) - the no-cutoff "oldest" case is
@@ -473,7 +478,8 @@ async def search_messages(
             page_size = (
                 max(num_before, _MAX_LIMIT) if sort_by == "oldest" else num_before
             )
-            result = _walk_messages_for_window(
+            result = await asyncio.to_thread(
+                _walk_messages_for_window,
                 client=client,
                 narrow=cast(list[dict[str, Any]], narrow),
                 page_size=page_size,
@@ -486,7 +492,8 @@ async def search_messages(
                 min_matches=None if sort_by == "oldest" else limit,
             )
         else:
-            result = client.get_messages_raw(
+            result = await asyncio.to_thread(
+                client.get_messages_raw,
                 anchor=anchor,
                 narrow=cast(list[dict[str, Any]], narrow),
                 num_before=num_before,

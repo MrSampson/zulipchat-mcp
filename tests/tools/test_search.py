@@ -1,5 +1,6 @@
 """Tests for tools/search.py."""
 
+import asyncio
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -13,6 +14,7 @@ from src.zulipchat_mcp.tools.search import (
     _MIN_LIMIT,
     AmbiguousUserError,
     UserNotFoundError,
+    _walk_messages_for_window,
     advanced_search,
     check_messages_match_narrow,
     construct_narrow,
@@ -209,6 +211,42 @@ class TestSearchTools:
         for boundary in (_MIN_LIMIT, _MAX_LIMIT):
             result = await search_messages(stream="test-stream", limit=boundary)
             assert result["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_search_messages_runs_direct_fetch_off_event_loop(self, mock_deps):
+        """The single-fetch path (no time filter) must dispatch the
+        blocking client.get_messages_raw call through asyncio.to_thread
+        instead of calling it inline on the event loop."""
+        mock_deps.get_messages_raw.return_value = {
+            "result": "success",
+            "messages": [],
+            "anchor": 1,
+        }
+
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            result = await search_messages(stream="test-stream")
+
+        assert result["status"] == "success"
+        mock_to_thread.assert_called_once()
+        assert mock_to_thread.call_args.args[0] is mock_deps.get_messages_raw
+
+    @pytest.mark.asyncio
+    async def test_search_messages_runs_window_walk_off_event_loop(self, mock_deps):
+        """The time-filtered backward-walk path must dispatch
+        _walk_messages_for_window through asyncio.to_thread instead of
+        running its (possibly many) blocking calls inline."""
+        mock_deps.get_messages_raw.return_value = {
+            "result": "success",
+            "messages": [],
+            "anchor": 1,
+        }
+
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            result = await search_messages(stream="test-stream", last_hours=1)
+
+        assert result["status"] == "success"
+        mock_to_thread.assert_called_once()
+        assert mock_to_thread.call_args.args[0] is _walk_messages_for_window
 
     @pytest.mark.asyncio
     async def test_time_filter_post_fetch(self, mock_deps):
