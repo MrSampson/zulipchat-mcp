@@ -49,13 +49,19 @@ class UserNotFoundError(Exception):
 _MAX_BACKWARD_PAGES = 10
 
 
+def _in_window(ts: float, cutoff_ts: float | None, before_ts: float | None) -> bool:
+    return (cutoff_ts is None or ts >= cutoff_ts) and (
+        before_ts is None or ts <= before_ts
+    )
+
+
 def _fetch_messages_until_cutoff(
     client: ZulipClientWrapper,
     narrow: list[dict[str, Any]],
     page_size: int,
     cutoff_ts: float | None = None,
     before_ts: float | None = None,
-    min_matches: int = 0,
+    min_matches: int | None = 0,
     max_pages: int = _MAX_BACKWARD_PAGES,
 ) -> dict[str, Any]:
     """Walk backward via message-ID anchor to cover a time-bounded window.
@@ -68,26 +74,27 @@ def _fetch_messages_until_cutoff(
     never moves. Walking backward, using each page's oldest message id as
     the next anchor, reaches past that wall.
 
-    With a `cutoff_ts` (from last_hours/last_days/after_time), the walk
-    stops once a page's oldest message crosses it. Without one - a
-    `before_time` filter used alone has no lower bound to walk toward - it
-    instead stops once at least `min_matches` collected messages pass the
-    `before_ts` filter. Either way, it also stops when a page comes back
-    shorter than `page_size` (the narrow's history is exhausted) or
-    `max_pages` is hit.
+    Stops as soon as any of these holds: `min_matches` is not None and that
+    many collected messages fall within [`cutoff_ts`, `before_ts`] (pass
+    `min_matches=None` when the caller needs the whole window regardless of
+    count, e.g. sort_by="oldest"); a page's oldest message crosses
+    `cutoff_ts` (if set); a page comes back shorter than `page_size` (the
+    narrow's history is exhausted); or `max_pages` is hit.
 
     Returns {"result": "success", "messages": [...], "window_complete":
-    bool} - `window_complete` is False when the cap was hit without
-    confirming the whole window was covered - or the raw error dict from
-    the first failing page.
+    bool} - `window_complete` is False when the cap was hit before any of
+    the other stop conditions confirmed the result is exact, or when a
+    later page failed and only partial results could be returned - or the
+    raw error dict from the first failing page.
     """
     anchor: str | int = "newest"
     include_anchor: bool = True
     messages: list[dict[str, Any]] = []
     window_complete: bool = False
+    matches_in_window: int = 0
 
     for _ in range(max_pages):
-        result = client.get_messages_raw(
+        result: dict[str, Any] = client.get_messages_raw(
             anchor=anchor,
             narrow=narrow,
             num_before=page_size,
@@ -101,26 +108,20 @@ def _fetch_messages_until_cutoff(
                 return result
             break
 
-        page_messages = result.get("messages", [])
+        page_messages: list[dict[str, Any]] = result.get("messages", [])
         if not page_messages:
             window_complete = True
             break
 
         messages = page_messages + messages
-        oldest = page_messages[0]
+        matches_in_window += sum(
+            1 for m in page_messages if _in_window(m["timestamp"], cutoff_ts, before_ts)
+        )
+        oldest: dict[str, Any] = page_messages[0]
 
-        crossed_cutoff = (
-            cutoff_ts is not None and oldest.get("timestamp", 0) < cutoff_ts
-        )
-        enough_matches = (
-            cutoff_ts is None
-            and before_ts is not None
-            and (
-                sum(1 for m in messages if m.get("timestamp", 0) <= before_ts)
-                >= min_matches
-            )
-        )
-        if crossed_cutoff or enough_matches:
+        crossed_cutoff: bool = cutoff_ts is not None and oldest["timestamp"] < cutoff_ts
+        enough: bool = min_matches is not None and matches_in_window >= min_matches
+        if crossed_cutoff or enough:
             window_complete = True
             break
         if len(page_messages) < page_size:
@@ -421,9 +422,9 @@ async def search_messages(
             )
             before_ts = bt.timestamp()
 
-        if cutoff_ts is not None or before_ts is not None:
+        time_filtered: bool = cutoff_ts is not None or before_ts is not None
+        if time_filtered:
             num_before = limit * 2  # Fetch extra to account for filtering
-            num_after = 0
 
         if sort_by == "oldest" and cutoff_ts is None:
             # Fetching the true oldest messages via anchor="oldest" only
@@ -437,14 +438,18 @@ async def search_messages(
             num_after = limit
 
         # Execute search
-        if anchor == "newest" and (cutoff_ts is not None or before_ts is not None):
+        if anchor == "newest" and time_filtered:
             result = _fetch_messages_until_cutoff(
                 client=client,
                 narrow=cast(list[dict[str, Any]], narrow),
                 page_size=num_before,
                 cutoff_ts=cutoff_ts,
                 before_ts=before_ts,
-                min_matches=limit,
+                # sort_by="oldest" needs the whole window regardless of how
+                # many matches turn up early, since the earliest-collected
+                # messages while walking backward are the most recent ones,
+                # not the oldest.
+                min_matches=None if sort_by == "oldest" else limit,
             )
         else:
             result = client.get_messages_raw(

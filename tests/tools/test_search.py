@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.zulipchat_mcp.tools.search import (
+    _MAX_BACKWARD_PAGES,
     AmbiguousUserError,
     UserNotFoundError,
     advanced_search,
@@ -49,6 +50,22 @@ def _paginated_get_messages_raw(
         return {"result": "success", "messages": page}
 
     return get_messages_raw
+
+
+def _noise_wall(now: datetime) -> list[dict[str, Any]]:
+    """5 target messages 80-100h old, plus 20 noise messages landing in the
+    last 60h - one page's worth at limit=10 (page_size=20), so a single
+    anchor="newest" fetch surfaces only noise and never reaches the target
+    window. Ascending by id and by timestamp, as the real Zulip API returns."""
+    target = [
+        _message(i, (now - timedelta(hours=100 - i * 5)).timestamp())
+        for i in range(1, 6)
+    ]
+    noise = [
+        _message(100 + k, (now - timedelta(hours=60 - k * 3)).timestamp())
+        for k in range(20)
+    ]
+    return target + noise
 
 
 class TestSearchTools:
@@ -282,22 +299,10 @@ class TestSearchTools:
         messages exist. Walking the anchor backward page by page must reach
         past the noise to find them.
         """
-        now = datetime.now()
-
-        # Target window: 5 messages, 80-100 hours old - older than
-        # before_time (72h ago) but within the last_hours cutoff (168h).
-        target = [
-            _message(i, (now - timedelta(hours=100 - i * 5)).timestamp())
-            for i in range(1, 6)
-        ]
-        # Noise: 20 messages landing in the last 60 hours - all newer than
-        # before_time, and exactly one page's worth (limit=10 -> page_size
-        # 20), so a single fetch surfaces only noise.
-        noise = [
-            _message(100 + k, (now - timedelta(hours=60 - k * 3)).timestamp())
-            for k in range(20)
-        ]
-        all_messages = target + noise  # ascending by id and by timestamp
+        now: datetime = datetime.now()
+        # Target window: 80-100 hours old - older than before_time (72h
+        # ago) but within the last_hours cutoff (168h).
+        all_messages: list[dict[str, Any]] = _noise_wall(now)
         mock_deps.get_messages_raw.side_effect = _paginated_get_messages_raw(
             all_messages
         )
@@ -325,17 +330,8 @@ class TestSearchTools:
         history runs out, or the page cap is hit) - same underlying "anchor
         never moves off 'now'" bug as the last_hours+before_time case.
         """
-        now = datetime.now()
-
-        target = [
-            _message(i, (now - timedelta(hours=100 - i * 5)).timestamp())
-            for i in range(1, 6)
-        ]
-        noise = [
-            _message(100 + k, (now - timedelta(hours=60 - k * 3)).timestamp())
-            for k in range(20)
-        ]
-        all_messages = target + noise
+        now: datetime = datetime.now()
+        all_messages: list[dict[str, Any]] = _noise_wall(now)
         mock_deps.get_messages_raw.side_effect = _paginated_get_messages_raw(
             all_messages
         )
@@ -349,6 +345,69 @@ class TestSearchTools:
         assert result["status"] == "success"
         ids = sorted(m["id"] for m in result["messages"])
         assert ids == [1, 2, 3, 4, 5]
+
+    @pytest.mark.asyncio
+    async def test_cutoff_only_search_needs_single_page_when_it_covers_limit(
+        self, mock_deps
+    ):
+        """A plain cutoff (last_hours/last_days/after_time, no before_time)
+        with sort_by="newest"/"relevance" must not walk multiple pages just
+        because the narrow's total history exceeds one page.
+
+        The window's upper edge is always "now", so whenever the window
+        holds more than `limit` matches, the single newest page already
+        contains the top `limit` of them - walking further would only
+        re-fetch older messages that get trimmed away anyway.
+        """
+        now: datetime = datetime.now()
+        # 1000 messages, all within the last few minutes - comfortably
+        # inside a 7-day cutoff, so nothing ever "crosses" it. Far more
+        # than one page's worth (limit*2 with the default limit=50).
+        all_messages: list[dict[str, Any]] = [
+            _message(i, (now - timedelta(minutes=1000 - i)).timestamp())
+            for i in range(1000)
+        ]
+        mock_deps.get_messages_raw.side_effect = _paginated_get_messages_raw(
+            all_messages
+        )
+
+        result = await search_messages(stream="test-stream", last_days=7)
+
+        assert result["status"] == "success"
+        assert result["window_complete"] is True
+        assert mock_deps.get_messages_raw.call_count == 1
+        ids = sorted(m["id"] for m in result["messages"])
+        assert ids == list(range(950, 1000))
+
+    @pytest.mark.asyncio
+    async def test_time_filter_oldest_sort_spans_pages(self, mock_deps):
+        """sort_by="oldest" with a cutoff spanning more than one page must
+        return the narrow's true oldest-in-window messages, not just the
+        oldest message from the single newest page.
+
+        Unlike "newest"/"relevance" sort, "oldest" can't stop early once it
+        has `limit` matches - the earliest messages collected while
+        walking backward are the most recent ones, not the oldest - so it
+        must walk until the cutoff is reached or the narrow's history
+        runs out.
+        """
+        now: datetime = datetime.now()
+        all_messages: list[dict[str, Any]] = [
+            _message(i, (now - timedelta(minutes=10 - i)).timestamp())
+            for i in range(10)
+        ]
+        mock_deps.get_messages_raw.side_effect = _paginated_get_messages_raw(
+            all_messages
+        )
+
+        result = await search_messages(
+            stream="test-stream", last_hours=1, limit=2, sort_by="oldest"
+        )
+
+        assert result["status"] == "success"
+        assert mock_deps.get_messages_raw.call_count > 1
+        ids = sorted(m["id"] for m in result["messages"])
+        assert ids == [0, 1]
 
     @pytest.mark.asyncio
     async def test_time_filter_cutoff_first_page_error_passthrough(self, mock_deps):
@@ -371,24 +430,25 @@ class TestSearchTools:
     ):
         """If a later page fails after an earlier page already returned
         data, the walk keeps what it already has instead of discarding it -
-        the failure is only visible through window_complete being False."""
-        now = datetime.now()
-        first_page = [
+        the failure is only visible through window_complete being False.
+
+        Uses sort_by="oldest" so the walk can't stop early just because the
+        first page already has enough matches for `limit` - it must always
+        attempt a second page here, which is what fails.
+        """
+        now: datetime = datetime.now()
+        first_page: list[dict[str, Any]] = [
             _message(1, (now - timedelta(minutes=1)).timestamp()),
             _message(2, (now - timedelta(minutes=0)).timestamp()),
         ]
-        call_count = 0
+        mock_deps.get_messages_raw.side_effect = [
+            {"result": "success", "messages": first_page},
+            {"result": "error", "msg": "Bad request"},
+        ]
 
-        def get_messages_raw(**kwargs: object) -> dict[str, object]:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return {"result": "success", "messages": first_page}
-            return {"result": "error", "msg": "Bad request"}
-
-        mock_deps.get_messages_raw.side_effect = get_messages_raw
-
-        result = await search_messages(stream="test-stream", last_hours=1, limit=1)
+        result = await search_messages(
+            stream="test-stream", last_hours=1, limit=1, sort_by="oldest"
+        )
 
         assert result["status"] == "success"
         assert result["window_complete"] is False
@@ -398,19 +458,28 @@ class TestSearchTools:
     async def test_time_filter_cutoff_hits_page_cap_marks_incomplete(self, mock_deps):
         """If a narrow never lets a page fall short of page_size or cross
         the cutoff within the hard page cap, the walk must stop instead of
-        looping forever, and must say so via window_complete."""
-        now = datetime.now()
-        page = [_message(i, (now - timedelta(minutes=i)).timestamp()) for i in range(4)]
+        looping forever, and must say so via window_complete.
+
+        Uses sort_by="oldest" so the walk can't stop early on match count -
+        only the cap can end it here, since the mock never shrinks or
+        crosses the cutoff regardless of how many pages are requested.
+        """
+        now: datetime = datetime.now()
+        page: list[dict[str, Any]] = [
+            _message(i, (now - timedelta(minutes=i)).timestamp()) for i in range(4)
+        ]
         mock_deps.get_messages_raw.return_value = {
             "result": "success",
             "messages": page,
         }
 
-        result = await search_messages(stream="test-stream", last_hours=1, limit=2)
+        result = await search_messages(
+            stream="test-stream", last_hours=1, limit=2, sort_by="oldest"
+        )
 
         assert result["status"] == "success"
         assert result["window_complete"] is False
-        assert mock_deps.get_messages_raw.call_count == 10
+        assert mock_deps.get_messages_raw.call_count == _MAX_BACKWARD_PAGES
 
     @pytest.mark.asyncio
     async def test_time_filter_cutoff_empty_first_page_returns_no_messages(
