@@ -849,8 +849,11 @@ async def check_messages_match_narrow(
             "narrow": narrow,
         }
 
-        result = client.client.call_endpoint(
-            "messages/matches_narrow", method="GET", request=request_data
+        result = await asyncio.to_thread(
+            client.client.call_endpoint,
+            "messages/matches_narrow",
+            method="GET",
+            request=request_data,
         )
 
         if result.get("result") == "success":
