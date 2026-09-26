@@ -171,7 +171,7 @@ class ZulipClientWrapper:
 
     def get_messages_raw(
         self,
-        anchor: str = "newest",
+        anchor: str | int = "newest",
         num_before: int = 100,
         num_after: int = 0,
         narrow: list[dict[str, Any]] | None = None,

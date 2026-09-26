@@ -1,7 +1,7 @@
 """Tests for tools/search.py."""
 
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -237,6 +237,74 @@ class TestSearchTools:
 
         assert result["status"] == "success"
         assert len(result["messages"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_time_filter_with_before_time_walks_past_recent_noise(
+        self, mock_deps
+    ):
+        """last_hours combined with before_time must not lose messages that
+        sit behind a wall of more-recent, non-matching traffic.
+
+        A single anchor="newest" fetch always re-anchors at "now" and only
+        ever reaches the newest `limit * 2` matching messages. If more than
+        that many messages have landed since `before_time`, the entire
+        target window (older than before_time, newer than the last_hours
+        cutoff) is behind that wall and never gets fetched at all - the
+        single-page fetch returns zero results even though matching
+        messages exist. Walking the anchor backward page by page must reach
+        past the noise to find them.
+        """
+        now = datetime.now()
+
+        def message(msg_id: int, timestamp: float) -> dict[str, Any]:
+            return {
+                "id": msg_id,
+                "sender_full_name": "U",
+                "sender_email": "e",
+                "timestamp": timestamp,
+                "content": f"msg{msg_id}",
+                "type": "stream",
+                "display_recipient": "test-stream",
+                "subject": "topic",
+            }
+
+        # Target window: 5 messages, 80-100 hours old - older than
+        # before_time (72h ago) but within the last_hours cutoff (168h).
+        target = [
+            message(i, (now - timedelta(hours=100 - i * 5)).timestamp())
+            for i in range(1, 6)
+        ]
+        # Noise: 20 messages landing in the last 60 hours - all newer than
+        # before_time, and exactly one page's worth (limit=10 -> page_size
+        # 20), so a single fetch surfaces only noise.
+        noise = [
+            message(100 + k, (now - timedelta(hours=60 - k * 3)).timestamp())
+            for k in range(20)
+        ]
+        all_messages = target + noise  # ascending by id and by timestamp
+
+        def get_messages_raw(**kwargs: object) -> dict[str, object]:
+            anchor = kwargs["anchor"]
+            num_before = cast(int, kwargs["num_before"])
+            if anchor == "newest":
+                page = all_messages[-num_before:]
+            else:
+                older = [m for m in all_messages if m["id"] < cast(int, anchor)]
+                page = older[-num_before:]
+            return {"result": "success", "messages": page}
+
+        mock_deps.get_messages_raw.side_effect = get_messages_raw
+
+        result = await search_messages(
+            stream="test-stream",
+            last_hours=168,
+            before_time=(now - timedelta(hours=72)).isoformat(),
+            limit=10,
+        )
+
+        assert result["status"] == "success"
+        ids = sorted(m["id"] for m in result["messages"])
+        assert ids == [1, 2, 3, 4, 5]
 
     @pytest.mark.asyncio
     async def test_time_filter_oldest_sort_returns_window(self, mock_deps):

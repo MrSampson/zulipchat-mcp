@@ -49,4 +49,5 @@ await advanced_search(
 
 - `search_messages` resolves non-email sender values with fuzzy user lookup.
 - Time filters are applied with a mix of anchor strategy and post-filtering.
+- When `last_hours`/`last_days`/`after_time` is set, matching messages are fetched by walking the anchor backward page by page until the cutoff is reached, so a `before_time` upper bound further back than one page's worth of newer traffic still gets found. The response's `window_complete` flag is `False` if a hard page cap was hit before the cutoff was reached, signaling the result may not cover the full requested window.
 - `advanced_search` aggregates across messages/users/streams and can return basic counts.

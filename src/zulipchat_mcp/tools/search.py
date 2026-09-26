@@ -46,6 +46,77 @@ class UserNotFoundError(Exception):
         super().__init__(f"No user matching '{identifier}'")
 
 
+_MAX_BACKWARD_PAGES = 10
+
+
+def _fetch_messages_until_cutoff(
+    client: ZulipClientWrapper,
+    narrow: list[dict[str, Any]],
+    cutoff_ts: float,
+    page_size: int,
+    max_pages: int = _MAX_BACKWARD_PAGES,
+) -> dict[str, Any]:
+    """Walk backward via message-ID anchor to cover a time-bounded window.
+
+    A single anchor="newest" fetch only ever reaches the newest `page_size`
+    messages. If a caller also narrows the top end with `before_time`, and
+    more than `page_size` messages have landed since then, the actual
+    target window sits entirely behind that wall and a single fetch returns
+    nothing - not because the messages don't exist, but because the anchor
+    never moves. Walking backward, using each page's oldest message id as
+    the next anchor, reaches past that wall.
+
+    Stops once a page's oldest message crosses `cutoff_ts`, a page comes
+    back shorter than `page_size` (the narrow's history is exhausted), or
+    `max_pages` is hit. Returns {"result": "success", "messages": [...],
+    "window_complete": bool} - `window_complete` is False when the cap was
+    hit without confirming the whole window was covered - or the raw error
+    dict from the first failing page.
+    """
+    anchor: str | int = "newest"
+    include_anchor = True
+    messages: list[dict[str, Any]] = []
+    window_complete = False
+
+    for _ in range(max_pages):
+        result = client.get_messages_raw(
+            anchor=anchor,
+            narrow=narrow,
+            num_before=page_size,
+            num_after=0,
+            include_anchor=include_anchor,
+            client_gravatar=True,
+            apply_markdown=True,
+        )
+        if result.get("result") != "success":
+            if not messages:
+                return result
+            break
+
+        page_messages = result.get("messages", [])
+        if not page_messages:
+            window_complete = True
+            break
+
+        messages = page_messages + messages
+        oldest = page_messages[0]
+        if oldest.get("timestamp", 0) < cutoff_ts:
+            window_complete = True
+            break
+        if len(page_messages) < page_size:
+            window_complete = True
+            break
+
+        anchor = oldest["id"]
+        include_anchor = False
+
+    return {
+        "result": "success",
+        "messages": messages,
+        "window_complete": window_complete,
+    }
+
+
 async def resolve_user_identifier(
     identifier: str, client: ZulipClientWrapper
 ) -> dict[str, Any]:
@@ -344,15 +415,23 @@ async def search_messages(
             num_after = limit
 
         # Execute search
-        result = client.get_messages_raw(
-            anchor=anchor,
-            narrow=cast(list[dict[str, Any]], narrow),
-            num_before=num_before,
-            num_after=num_after,
-            include_anchor=True,
-            client_gravatar=True,
-            apply_markdown=True,
-        )
+        if cutoff_ts is not None:
+            result = _fetch_messages_until_cutoff(
+                client=client,
+                narrow=cast(list[dict[str, Any]], narrow),
+                cutoff_ts=cutoff_ts,
+                page_size=num_before,
+            )
+        else:
+            result = client.get_messages_raw(
+                anchor=anchor,
+                narrow=cast(list[dict[str, Any]], narrow),
+                num_before=num_before,
+                num_after=num_after,
+                include_anchor=True,
+                client_gravatar=True,
+                apply_markdown=True,
+            )
 
         if result.get("result") == "success":
             messages = result.get("messages", [])
@@ -401,6 +480,7 @@ async def search_messages(
                 "anchor": result.get("anchor"),
                 "narrow_applied": narrow,
                 "sort_by": sort_by,
+                "window_complete": result.get("window_complete", True),
             }
         else:
             return {"status": "error", "error": result.get("msg", "Search failed")}
