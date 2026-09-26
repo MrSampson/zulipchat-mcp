@@ -176,7 +176,7 @@ async def resolve_user_identifier(
     try:
         # Try exact email match first
         if "@" in identifier:
-            response = client.get_users()
+            response = await asyncio.to_thread(client.get_users)
             if response.get("result") == "success":
                 users = response.get("members", [])
                 exact_match = next(
@@ -186,7 +186,7 @@ async def resolve_user_identifier(
                     return exact_match
 
         # Get all users for fuzzy matching
-        response = client.get_users()
+        response = await asyncio.to_thread(client.get_users)
         if response.get("result") != "success":
             raise Exception(
                 f"Failed to fetch users: {response.get('msg', 'Unknown error')}"
@@ -621,7 +621,7 @@ async def advanced_search(
 
         # Search users
         if "users" in search_type:
-            users_response = client.get_users()
+            users_response = await asyncio.to_thread(client.get_users)
             if users_response.get("result") == "success":
                 users = users_response.get("members", [])
                 matching_users = [
@@ -638,7 +638,7 @@ async def advanced_search(
 
         # Search streams
         if "streams" in search_type:
-            streams_response = client.get_streams()
+            streams_response = await asyncio.to_thread(client.get_streams)
             if streams_response.get("result") == "success":
                 streams = streams_response.get("streams", [])
                 matching_streams = [
