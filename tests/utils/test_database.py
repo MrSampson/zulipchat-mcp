@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -502,6 +503,26 @@ class TestSqliteDatabaseManager:
 
         assert isinstance(db, SqliteDatabaseManager)
         assert get_database() is db
+
+    def test_execute_with_datetime_param_does_not_use_deprecated_adapter(
+        self, tmp_path: Path, recwarn: pytest.WarningsRecorder
+    ) -> None:
+        """A raw Python ``datetime`` bound as a query parameter must not fall
+        through to sqlite3's own default datetime adapter - Python 3.12
+        deprecated it (removal-slated), and database_manager.py passes
+        ``datetime.now(timezone.utc)`` straight through as a parameter on
+        essentially every write (see e.g. agent_profiles.updated_at).
+        """
+        db = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
+
+        db.execute(
+            "INSERT INTO agent_events "
+            "(id, zulip_message_id, topic, sender_email, content, created_at, acked) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("evt1", 100, "topic", "a@b.com", "hi", datetime.now(timezone.utc), False),
+        )
+
+        assert not any("datetime adapter" in str(w.message) for w in recwarn.list)
 
 
 class TestPostgresDatabaseManager:
