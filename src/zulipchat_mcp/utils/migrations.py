@@ -31,11 +31,27 @@ def _adapt_datetime(value: datetime) -> str:
     return value.isoformat(" ")
 
 
-# Registers process-wide (sqlite3.register_adapter has no per-connection
-# scope), so this runs once at import time rather than per engine/manager -
-# covers every sqlite3 consumer in the process alike (SqliteDatabaseManager
-# and Alembic's own migration connections in migrations/env.py).
+def _convert_datetime(raw: bytes) -> datetime:
+    """Parses `_adapt_datetime`'s own output back into a `datetime` - the
+    write-side half of a matched pair, needed so sqlite returns real
+    `datetime` objects like duckdb/postgres already do instead of the raw
+    stored string. Only takes effect with PARSE_DECLTYPES (below); sqlite3
+    hands converters the column's raw bytes, not str.
+    """
+    return datetime.fromisoformat(raw.decode())
+
+
+# Registers process-wide (sqlite3.register_adapter/register_converter have
+# no per-connection scope), so this runs once at import time rather than
+# per engine/manager - covers every sqlite3 consumer in the process alike
+# (SqliteDatabaseManager and Alembic's own migration connections in
+# migrations/env.py). Converter names are matched case-insensitively
+# against the declared column type up to its first "(": "datetime" covers
+# schema.py's `sa.DateTime()` columns (DDL type "DATETIME"), "timestamp"
+# covers ad-hoc "TIMESTAMP"-typed columns tests create directly.
 sqlite3.register_adapter(datetime, _adapt_datetime)
+sqlite3.register_converter("datetime", _convert_datetime)
+sqlite3.register_converter("timestamp", _convert_datetime)
 
 
 def sqlalchemy_url(db_path: str) -> str:
@@ -86,9 +102,15 @@ def make_engine(db_path: str) -> Engine:
 
 def make_sqlite_engine(db_path: str) -> Engine:
     """Build the shared sqlite3 Engine for db_path. NullPool for the same
-    file-lock-release reason as make_engine() above.
+    file-lock-release reason as make_engine() above. detect_types enables
+    the converters registered above, so DateTime columns come back as real
+    `datetime` objects instead of raw strings, matching duckdb/postgres.
     """
-    return create_engine(sqlite_sqlalchemy_url(db_path), poolclass=NullPool)
+    return create_engine(
+        sqlite_sqlalchemy_url(db_path),
+        poolclass=NullPool,
+        connect_args={"detect_types": sqlite3.PARSE_DECLTYPES},
+    )
 
 
 def _alembic_config_for_url(url: str | URL) -> Config:
