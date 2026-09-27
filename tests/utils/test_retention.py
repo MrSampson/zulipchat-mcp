@@ -347,6 +347,26 @@ class TestRunRetentionCleanup:
 
         assert db.query("SELECT task_id FROM tasks") == [("task-1",)]
 
+    def test_stale_ceiling_keeps_completed_task_with_old_started_at(
+        self, db: DatabaseManager
+    ) -> None:
+        """A task that ran a long time but completed recently is terminal,
+        not abandoned - the ceiling must key off completion, not start."""
+        _insert_task(db, "task-1", PAST_CEILING, completed_at=RECENT)
+
+        run_retention_cleanup(db, retention_days=30, stale_ceiling_days=90)
+
+        assert db.query("SELECT task_id FROM tasks") == [("task-1",)]
+
+    def test_stale_ceiling_runs_independently_of_disabled_retention_days(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_agent_request(db, "req-1", PAST_CEILING, status="pending")
+
+        run_retention_cleanup(db, retention_days=0, stale_ceiling_days=90)
+
+        assert db.query("SELECT request_id FROM agent_requests") == []
+
     def test_zero_stale_ceiling_days_disables_ceiling(
         self, db: DatabaseManager
     ) -> None:
@@ -390,3 +410,26 @@ class TestRunRetentionCleanup:
         assert db.query("SELECT id FROM agent_events") == [("evt-1",)]
         # user_input_requests delete still ran despite the earlier failure
         assert db.query("SELECT request_id FROM user_input_requests") == []
+
+    def test_ceiling_statement_still_runs_when_that_table_retention_statement_fails(
+        self, db: DatabaseManager
+    ) -> None:
+        """The retention-days delete and the stale-ceiling delete for the
+        same table are two independent statements - one failing must not
+        skip the other.
+        """
+        _insert_agent_request(db, "req-1", PAST_CEILING, status="pending")
+        real_execute = db.execute
+
+        def _flaky_execute(
+            sql: str, params: list[Any] | tuple[Any, ...] | None = None
+        ) -> None:
+            if "agent_requests" in sql and "status" in sql:
+                raise RuntimeError("simulated failure")
+            real_execute(sql, params)
+
+        with patch.object(db, "execute", side_effect=_flaky_execute):
+            run_retention_cleanup(db, retention_days=30, stale_ceiling_days=90)
+
+        # the ceiling delete still ran and removed the past-ceiling row
+        assert db.query("SELECT request_id FROM agent_requests") == []
