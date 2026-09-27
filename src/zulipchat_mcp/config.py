@@ -59,6 +59,7 @@ class DatabaseBackend(StrEnum):
 
 
 DEFAULT_RETENTION_DAYS = 30
+DEFAULT_STALE_CEILING_DAYS = 90
 
 
 def _default_db_path(backend: DatabaseBackend) -> str:
@@ -82,6 +83,7 @@ class DatabaseConfig:
     postgres_user: str | None = None
     postgres_password: str | None = None
     retention_days: int = DEFAULT_RETENTION_DAYS
+    stale_ceiling_days: int = DEFAULT_STALE_CEILING_DAYS
 
 
 @dataclass
@@ -241,6 +243,7 @@ class ConfigManager:
             postgres_user=user,
             postgres_password=self._env("POSTGRES_PASSWORD"),
             retention_days=self._get_retention_days(),
+            stale_ceiling_days=self._get_stale_ceiling_days(),
         )
 
     def _get_retention_days(self) -> int:
@@ -262,6 +265,26 @@ class ConfigManager:
                 f"{DEFAULT_RETENTION_DAYS}"
             )
             return DEFAULT_RETENTION_DAYS
+
+    def _get_stale_ceiling_days(self) -> int:
+        """Days after which non-terminal rows in session_events,
+        agent_requests, user_input_requests, and tasks are deleted
+        regardless of status - bounding rows that a crashed or unresponsive
+        process left permanently pending/unacked. Any value <= 0 disables
+        this cleanup entirely. Falls back to the default on an unparseable
+        value rather than failing startup over a non-critical knob.
+        """
+        raw = self._env("ZULIPCHAT_STALE_CEILING_DAYS")
+        if raw is None:
+            return DEFAULT_STALE_CEILING_DAYS
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning(
+                f"Invalid ZULIPCHAT_STALE_CEILING_DAYS={raw!r}; using default "
+                f"{DEFAULT_STALE_CEILING_DAYS}"
+            )
+            return DEFAULT_STALE_CEILING_DAYS
 
     def _get_debug(self) -> bool:
         """Get debug mode setting."""

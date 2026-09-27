@@ -140,3 +140,33 @@ def test_database_config_retention_days_falls_back_on_invalid_value(
     config = ConfigManager()
 
     assert config.config.database.retention_days == 30
+
+
+def test_database_config_stale_ceiling_days_defaults_to_ninety(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ZULIPCHAT_STALE_CEILING_DAYS", raising=False)
+
+    config = ConfigManager()
+
+    assert config.config.database.stale_ceiling_days == 90
+
+
+def test_database_config_reads_stale_ceiling_days_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZULIPCHAT_STALE_CEILING_DAYS", "14")
+
+    config = ConfigManager()
+
+    assert config.config.database.stale_ceiling_days == 14
+
+
+def test_database_config_stale_ceiling_days_falls_back_on_invalid_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZULIPCHAT_STALE_CEILING_DAYS", "not-a-number")
+
+    config = ConfigManager()
+
+    assert config.config.database.stale_ceiling_days == 90

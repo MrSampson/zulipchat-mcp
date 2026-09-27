@@ -557,7 +557,7 @@ def init_database(config: DatabaseConfig) -> DatabaseManager:
     else:
         raise ValueError(f"Unsupported DATABASE_BACKEND: {backend}")
 
-    run_retention_cleanup(_db_manager, config.retention_days)
+    run_retention_cleanup(_db_manager, config.retention_days, config.stale_ceiling_days)
     return _db_manager
 
 

@@ -174,6 +174,7 @@ Agent state (sessions, scheduled tasks, message history for analytics, etc.) per
 | `POSTGRES_USER` | Postgres user |
 | `POSTGRES_PASSWORD` | Postgres password |
 | `ZULIPCHAT_RETENTION_DAYS` | Days to keep rows in the agent event/request tables before they're deleted on startup - terminal-state rows only (acked/answered/completed), except `agent_events`, which is pruned by age alone (default: `30`; any value `<= 0` disables cleanup) |
+| `ZULIPCHAT_STALE_CEILING_DAYS` | Days after which `session_events`, `agent_requests`, `user_input_requests`, and `tasks` rows are deleted regardless of status - bounds rows a crashed or unresponsive process left permanently pending/unacked (default: `90`; any value `<= 0` disables this cleanup) |
 
 `duckdb` and `postgres` support ship as optional extras rather than default dependencies, so install the one matching your backend:
 
