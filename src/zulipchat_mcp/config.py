@@ -74,6 +74,7 @@ class DatabaseConfig:
     postgres_db: str | None = None
     postgres_user: str | None = None
     postgres_password: str | None = None
+    retention_days: int = 30
 
 
 @dataclass
@@ -232,7 +233,23 @@ class ConfigManager:
             postgres_db=dbname,
             postgres_user=user,
             postgres_password=self._env("POSTGRES_PASSWORD"),
+            retention_days=self._get_retention_days(),
         )
+
+    def _get_retention_days(self) -> int:
+        """Days to keep terminal-state rows in the event/request tables
+        (agent_events, session_events, agent_requests, user_input_requests,
+        tasks) before retention cleanup deletes them. 0 disables cleanup.
+        Falls back to the default on an unparseable value rather than
+        failing startup over a non-critical knob.
+        """
+        raw = self._env("ZULIPCHAT_RETENTION_DAYS")
+        if raw is None:
+            return 30
+        try:
+            return int(raw)
+        except ValueError:
+            return 30
 
     def _get_debug(self) -> bool:
         """Get debug mode setting."""

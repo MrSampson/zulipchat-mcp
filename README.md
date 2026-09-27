@@ -173,6 +173,7 @@ Agent state (sessions, scheduled tasks, message history for analytics, etc.) per
 | `POSTGRES_DB` | Postgres database name |
 | `POSTGRES_USER` | Postgres user |
 | `POSTGRES_PASSWORD` | Postgres password |
+| `ZULIPCHAT_RETENTION_DAYS` | Days to keep terminal-state rows in the agent event/request tables before they're deleted on startup (default: `30`; `0` disables cleanup) |
 
 `duckdb` and `postgres` support ship as optional extras rather than default dependencies, so install the one matching your backend:
 
