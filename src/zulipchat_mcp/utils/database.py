@@ -371,18 +371,7 @@ class SqliteDatabaseManager(_QmarkFileBackend):
     """
 
     def _make_engine(self, db_path: str) -> Engine:
-        import sqlite3
-
         from .migrations import make_sqlite_engine
-
-        # exec_driver_sql() below hands `datetime` params straight to the
-        # sqlite3 DBAPI, bypassing SQLAlchemy's type system - which means
-        # sqlite3's own default datetime adapter would otherwise run.
-        # Deprecated (removal-slated) as of Python 3.12; this reproduces the
-        # exact same "YYYY-MM-DD HH:MM:SS[.ffffff]" string explicitly instead
-        # (docs.python.org/3/library/sqlite3.html#sqlite3-adapter-converter-recipes),
-        # so stored values are unchanged.
-        sqlite3.register_adapter(datetime, lambda value: value.isoformat(" "))
 
         return make_sqlite_engine(db_path)
 

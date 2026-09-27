@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from alembic import command
@@ -14,6 +16,26 @@ INITIAL_REVISION = "0001"
 IN_MEMORY_DB_PATH = ":memory:"
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+
+
+def _adapt_datetime(value: datetime) -> str:
+    """Explicit stand-in for sqlite3's own default datetime adapter, which
+    Python 3.12 deprecated (removal-slated). Deliberately uses a " " (not
+    the sqlite3 docs' recipe's "T") separator: the deprecated default
+    adapter used " ", and database.py's DatabaseManager.execute()/query()
+    pass `datetime` params straight to the sqlite3 DBAPI (via
+    exec_driver_sql(), bypassing SQLAlchemy's type system) - matching that
+    exact string keeps every already-stored value byte-identical across
+    this fix, rather than switching format wholesale.
+    """
+    return value.isoformat(" ")
+
+
+# Registers process-wide (sqlite3.register_adapter has no per-connection
+# scope), so this runs once at import time rather than per engine/manager -
+# covers every sqlite3 consumer in the process alike (SqliteDatabaseManager
+# and Alembic's own migration connections in migrations/env.py).
+sqlite3.register_adapter(datetime, _adapt_datetime)
 
 
 def sqlalchemy_url(db_path: str) -> str:

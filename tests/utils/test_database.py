@@ -504,18 +504,14 @@ class TestSqliteDatabaseManager:
         assert isinstance(db, SqliteDatabaseManager)
         assert get_database() is db
 
+    @pytest.mark.filterwarnings("error::DeprecationWarning")
     def test_execute_with_datetime_param_does_not_use_deprecated_adapter(
-        self, tmp_path: Path, recwarn: pytest.WarningsRecorder
+        self, tmp_path: Path
     ) -> None:
-        """A raw Python ``datetime`` bound as a query parameter must not fall
-        through to sqlite3's own default datetime adapter - Python 3.12
-        deprecated it (removal-slated), and database_manager.py passes
-        ``datetime.now(timezone.utc)`` straight through as a parameter on
-        essentially every write (see e.g. agent_profiles.updated_at). Checks
-        both that the deprecated path is avoided and that the replacement
-        adapter reproduces the exact same string the deprecated one did (for
-        a value with and one without microseconds), so a stored column stays
-        byte-identical across the fix - not just warning-free.
+        """A `datetime` query parameter must reach sqlite3 through the
+        explicit adapter, not the deprecated (Python 3.12+) default one -
+        and must produce the exact same stored string that default adapter
+        did, for a value with and one without microseconds.
         """
         db_path = str(tmp_path / "test.sqlite3")
         db = SqliteDatabaseManager(db_path)
@@ -533,8 +529,6 @@ class TestSqliteDatabaseManager:
         db.execute(
             insert_sql, ("evt2", 100, "topic", "a@b.com", "hi", without_micros, False)
         )
-
-        assert not any("datetime adapter" in str(w.message) for w in recwarn.list)
 
         conn = sqlite3.connect(db_path)
         try:
