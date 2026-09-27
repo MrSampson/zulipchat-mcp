@@ -1,27 +1,37 @@
-"""Retention cleanup for the insert-only event/request tables.
+"""Retention cleanup for the insert-only event/request/task tables.
 
 agent_events, session_events, agent_requests, user_input_requests, and
 tasks are never deleted by their own INSERT/UPDATE call sites (see
-database_manager.py) - left alone they grow without bound. This module
-deletes rows once they're no longer needed: a terminal state has been
-reached (acked, non-pending status, completed) and the row is older than
-the configured retention window. Rows still in flight are never deleted
-regardless of age.
+database_manager.py and tools/agents.py) - left alone they grow without
+bound. This module deletes rows once they're old enough that nothing will
+look for them.
+
+For session_events, agent_requests, user_input_requests, and tasks, that
+means a terminal state (acked, non-pending status, completed) reached
+before the retention window - anything still in flight is kept regardless
+of age. agent_events is the exception: its `acked` flag is not a reliable
+"processed" signal (the only code path that ever sets it - teleport_chat's
+wait-for-reply - only acks the one row it matched, out of the most recent
+unacked ones, so most rows stay acked=FALSE forever regardless of age), so
+it's pruned by age alone.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
-from .database import DatabaseManager
 from .logging import get_logger
+
+if TYPE_CHECKING:
+    from .database import DatabaseManager
 
 logger = get_logger(__name__)
 
 _CLEANUP_STATEMENTS: tuple[tuple[str, str], ...] = (
     (
         "agent_events",
-        "DELETE FROM agent_events WHERE acked = TRUE AND created_at < ?",
+        "DELETE FROM agent_events WHERE created_at < ?",
     ),
     (
         "session_events",

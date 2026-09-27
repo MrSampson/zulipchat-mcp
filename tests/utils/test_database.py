@@ -449,7 +449,7 @@ class TestDatabaseManager:
         from src.zulipchat_mcp.config import DatabaseBackend, DatabaseConfig
 
         with patch(
-            "src.zulipchat_mcp.utils.retention.run_retention_cleanup"
+            "src.zulipchat_mcp.utils.database.run_retention_cleanup"
         ) as mock_cleanup:
             db = init_database(
                 DatabaseConfig(

@@ -1,15 +1,15 @@
-"""Tests for utils/retention.py: deleting terminal-state rows from the
-insert-only event/request tables (agent_events, session_events,
-agent_requests, user_input_requests, tasks) once they're older than a
-configured retention window. Runs against the same cross-backend `db`
-fixture as test_database_backends.py (duckdb/sqlite always, postgres when
-Docker is available) since the delete rules must hold identically on every
-backend.
+"""Tests for utils/retention.py: deleting rows from the insert-only
+event/request/task tables (agent_events, session_events, agent_requests,
+user_input_requests, tasks) once they're older than a configured retention
+window. Runs against the same cross-backend `db` fixture as
+test_database_backends.py (duckdb/sqlite always, postgres when Docker is
+available) since the delete rules must hold identically on every backend.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from unittest.mock import patch
 
 from src.zulipchat_mcp.utils.database import DatabaseManager
@@ -17,6 +17,28 @@ from src.zulipchat_mcp.utils.retention import run_retention_cleanup
 
 OLD = datetime.now(timezone.utc) - timedelta(days=60)
 RECENT = datetime.now(timezone.utc) - timedelta(days=1)
+
+
+def _insert_agent_event(
+    db: DatabaseManager, event_id: str, created_at: datetime, acked: bool
+) -> None:
+    flag = "TRUE" if acked else "FALSE"
+    db.execute(
+        "INSERT INTO agent_events (id, topic, sender_email, content, created_at, acked) "
+        f"VALUES (?, ?, ?, ?, ?, {flag})",
+        [event_id, "topic", "a@b.com", "hi", created_at],
+    )
+
+
+def _insert_session_event(
+    db: DatabaseManager, event_id: str, created_at: datetime, acked: bool
+) -> None:
+    flag = "TRUE" if acked else "FALSE"
+    db.execute(
+        "INSERT INTO session_events (id, direction, event_type, created_at, acked) "
+        f"VALUES (?, ?, ?, ?, {flag})",
+        [event_id, "inbound", "message", created_at],
+    )
 
 
 def _seed_agent_and_session(
@@ -62,52 +84,91 @@ def _seed_agent_and_session(
     )
 
 
+def _insert_agent_request(
+    db: DatabaseManager, request_id: str, created_at: datetime, status: str
+) -> None:
+    _seed_agent_and_session(db)
+    db.execute(
+        "INSERT INTO agent_requests "
+        "(request_id, agent_id, session_id, request_type, prompt, status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [request_id, "agent-1", "sess-1", "input", "question?", status, created_at],
+    )
+
+
+def _insert_user_input_request(
+    db: DatabaseManager, request_id: str, created_at: datetime, status: str
+) -> None:
+    db.execute(
+        "INSERT INTO user_input_requests (request_id, agent_id, question, status, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [request_id, "agent-1", "question?", status, created_at],
+    )
+
+
+def _insert_task(
+    db: DatabaseManager,
+    task_id: str,
+    created_at: datetime,
+    completed_at: datetime | None,
+) -> None:
+    if completed_at is None:
+        db.execute(
+            "INSERT INTO tasks (task_id, agent_id, name, status, started_at) "
+            "VALUES (?, ?, ?, 'started', ?)",
+            [task_id, "agent-1", "do thing", created_at],
+        )
+    else:
+        db.execute(
+            "INSERT INTO tasks (task_id, agent_id, name, status, started_at, completed_at) "
+            "VALUES (?, ?, ?, 'completed', ?, ?)",
+            [task_id, "agent-1", "do thing", created_at, completed_at],
+        )
+
+
 class TestRunRetentionCleanup:
+    """agent_events has no reliable "processed" signal: the only code path
+    that ever sets acked=TRUE (teleport_chat's wait-for-reply) only acks the
+    one row it matched, out of the most recent unacked ones - most rows stay
+    acked=FALSE forever regardless of age. So, unlike every other table
+    here, agent_events is pruned by age alone, not gated on acked.
+    """
+
     def test_deletes_acked_agent_event_older_than_window(
         self, db: DatabaseManager
     ) -> None:
-        db.execute(
-            "INSERT INTO agent_events (id, topic, sender_email, content, created_at, acked) "
-            "VALUES (?, ?, ?, ?, ?, TRUE)",
-            ["evt-1", "topic", "a@b.com", "hi", OLD],
-        )
+        _insert_agent_event(db, "evt-1", OLD, acked=True)
 
         run_retention_cleanup(db, retention_days=30)
 
         assert db.query("SELECT id FROM agent_events") == []
 
-    def test_keeps_unacked_agent_event_regardless_of_age(
+    def test_deletes_unacked_agent_event_older_than_window(
         self, db: DatabaseManager
     ) -> None:
-        db.execute(
-            "INSERT INTO agent_events (id, topic, sender_email, content, created_at, acked) "
-            "VALUES (?, ?, ?, ?, ?, FALSE)",
-            ["evt-1", "topic", "a@b.com", "hi", OLD],
-        )
+        _insert_agent_event(db, "evt-1", OLD, acked=False)
 
         run_retention_cleanup(db, retention_days=30)
 
-        assert db.query("SELECT id FROM agent_events") == [("evt-1",)]
+        assert db.query("SELECT id FROM agent_events") == []
 
-    def test_keeps_acked_agent_event_within_window(self, db: DatabaseManager) -> None:
-        db.execute(
-            "INSERT INTO agent_events (id, topic, sender_email, content, created_at, acked) "
-            "VALUES (?, ?, ?, ?, ?, TRUE)",
-            ["evt-1", "topic", "a@b.com", "hi", RECENT],
-        )
+    def test_keeps_agent_event_within_window_regardless_of_acked(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_agent_event(db, "evt-1", RECENT, acked=True)
+        _insert_agent_event(db, "evt-2", RECENT, acked=False)
 
         run_retention_cleanup(db, retention_days=30)
 
-        assert db.query("SELECT id FROM agent_events") == [("evt-1",)]
+        assert db.query("SELECT id FROM agent_events ORDER BY id") == [
+            ("evt-1",),
+            ("evt-2",),
+        ]
 
     def test_deletes_acked_session_event_older_than_window(
         self, db: DatabaseManager
     ) -> None:
-        db.execute(
-            "INSERT INTO session_events (id, direction, event_type, created_at, acked) "
-            "VALUES (?, ?, ?, ?, TRUE)",
-            ["se-1", "inbound", "message", OLD],
-        )
+        _insert_session_event(db, "se-1", OLD, acked=True)
 
         run_retention_cleanup(db, retention_days=30)
 
@@ -116,11 +177,14 @@ class TestRunRetentionCleanup:
     def test_keeps_unacked_session_event_regardless_of_age(
         self, db: DatabaseManager
     ) -> None:
-        db.execute(
-            "INSERT INTO session_events (id, direction, event_type, created_at, acked) "
-            "VALUES (?, ?, ?, ?, FALSE)",
-            ["se-1", "inbound", "message", OLD],
-        )
+        _insert_session_event(db, "se-1", OLD, acked=False)
+
+        run_retention_cleanup(db, retention_days=30)
+
+        assert db.query("SELECT id FROM session_events") == [("se-1",)]
+
+    def test_keeps_acked_session_event_within_window(self, db: DatabaseManager) -> None:
+        _insert_session_event(db, "se-1", RECENT, acked=True)
 
         run_retention_cleanup(db, retention_days=30)
 
@@ -129,13 +193,7 @@ class TestRunRetentionCleanup:
     def test_deletes_non_pending_agent_request_older_than_window(
         self, db: DatabaseManager
     ) -> None:
-        _seed_agent_and_session(db)
-        db.execute(
-            "INSERT INTO agent_requests "
-            "(request_id, agent_id, session_id, request_type, prompt, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'timeout', ?)",
-            ["req-1", "agent-1", "sess-1", "input", "question?", OLD],
-        )
+        _insert_agent_request(db, "req-1", OLD, status="timeout")
 
         run_retention_cleanup(db, retention_days=30)
 
@@ -144,13 +202,16 @@ class TestRunRetentionCleanup:
     def test_keeps_pending_agent_request_regardless_of_age(
         self, db: DatabaseManager
     ) -> None:
-        _seed_agent_and_session(db)
-        db.execute(
-            "INSERT INTO agent_requests "
-            "(request_id, agent_id, session_id, request_type, prompt, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
-            ["req-1", "agent-1", "sess-1", "input", "question?", OLD],
-        )
+        _insert_agent_request(db, "req-1", OLD, status="pending")
+
+        run_retention_cleanup(db, retention_days=30)
+
+        assert db.query("SELECT request_id FROM agent_requests") == [("req-1",)]
+
+    def test_keeps_non_pending_agent_request_within_window(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_agent_request(db, "req-1", RECENT, status="answered")
 
         run_retention_cleanup(db, retention_days=30)
 
@@ -159,11 +220,7 @@ class TestRunRetentionCleanup:
     def test_deletes_non_pending_user_input_request_older_than_window(
         self, db: DatabaseManager
     ) -> None:
-        db.execute(
-            "INSERT INTO user_input_requests (request_id, agent_id, question, status, created_at) "
-            "VALUES (?, ?, ?, 'answered', ?)",
-            ["uir-1", "agent-1", "question?", OLD],
-        )
+        _insert_user_input_request(db, "uir-1", OLD, status="answered")
 
         run_retention_cleanup(db, retention_days=30)
 
@@ -172,11 +229,16 @@ class TestRunRetentionCleanup:
     def test_keeps_pending_user_input_request_regardless_of_age(
         self, db: DatabaseManager
     ) -> None:
-        db.execute(
-            "INSERT INTO user_input_requests (request_id, agent_id, question, status, created_at) "
-            "VALUES (?, ?, ?, 'pending', ?)",
-            ["uir-1", "agent-1", "question?", OLD],
-        )
+        _insert_user_input_request(db, "uir-1", OLD, status="pending")
+
+        run_retention_cleanup(db, retention_days=30)
+
+        assert db.query("SELECT request_id FROM user_input_requests") == [("uir-1",)]
+
+    def test_keeps_non_pending_user_input_request_within_window(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_user_input_request(db, "uir-1", RECENT, status="answered")
 
         run_retention_cleanup(db, retention_days=30)
 
@@ -185,33 +247,28 @@ class TestRunRetentionCleanup:
     def test_deletes_completed_task_older_than_window(
         self, db: DatabaseManager
     ) -> None:
-        db.execute(
-            "INSERT INTO tasks (task_id, agent_id, name, status, started_at, completed_at) "
-            "VALUES (?, ?, ?, 'completed', ?, ?)",
-            ["task-1", "agent-1", "do thing", OLD, OLD],
-        )
+        _insert_task(db, "task-1", OLD, completed_at=OLD)
 
         run_retention_cleanup(db, retention_days=30)
 
         assert db.query("SELECT task_id FROM tasks") == []
 
     def test_keeps_incomplete_task_regardless_of_age(self, db: DatabaseManager) -> None:
-        db.execute(
-            "INSERT INTO tasks (task_id, agent_id, name, status, started_at) "
-            "VALUES (?, ?, ?, 'started', ?)",
-            ["task-1", "agent-1", "do thing", OLD],
-        )
+        _insert_task(db, "task-1", OLD, completed_at=None)
+
+        run_retention_cleanup(db, retention_days=30)
+
+        assert db.query("SELECT task_id FROM tasks") == [("task-1",)]
+
+    def test_keeps_completed_task_within_window(self, db: DatabaseManager) -> None:
+        _insert_task(db, "task-1", RECENT, completed_at=RECENT)
 
         run_retention_cleanup(db, retention_days=30)
 
         assert db.query("SELECT task_id FROM tasks") == [("task-1",)]
 
     def test_zero_retention_days_disables_cleanup(self, db: DatabaseManager) -> None:
-        db.execute(
-            "INSERT INTO agent_events (id, topic, sender_email, content, created_at, acked) "
-            "VALUES (?, ?, ?, ?, ?, TRUE)",
-            ["evt-1", "topic", "a@b.com", "hi", OLD],
-        )
+        _insert_agent_event(db, "evt-1", OLD, acked=True)
 
         run_retention_cleanup(db, retention_days=0)
 
@@ -224,22 +281,16 @@ class TestRunRetentionCleanup:
         not stop the remaining tables' cleanup - this runs once at server
         startup, and one bad statement shouldn't block the rest.
         """
-        db.execute(
-            "INSERT INTO agent_events (id, topic, sender_email, content, created_at, acked) "
-            "VALUES (?, ?, ?, ?, ?, TRUE)",
-            ["evt-1", "topic", "a@b.com", "hi", OLD],
-        )
-        db.execute(
-            "INSERT INTO user_input_requests (request_id, agent_id, question, status, created_at) "
-            "VALUES (?, ?, ?, 'answered', ?)",
-            ["uir-1", "agent-1", "question?", OLD],
-        )
+        _insert_agent_event(db, "evt-1", OLD, acked=True)
+        _insert_user_input_request(db, "uir-1", OLD, status="answered")
         real_execute = db.execute
 
-        def _flaky_execute(sql, params=None):
+        def _flaky_execute(
+            sql: str, params: list[Any] | tuple[Any, ...] | None = None
+        ) -> None:
             if "agent_events" in sql:
                 raise RuntimeError("simulated failure")
-            return real_execute(sql, params)
+            real_execute(sql, params)
 
         with patch.object(db, "execute", side_effect=_flaky_execute):
             run_retention_cleanup(db, retention_days=30)
