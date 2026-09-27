@@ -125,17 +125,9 @@ class TestDatabaseManagerAcrossBackends:
     def test_execute_strips_tzinfo_from_aware_datetime_params(
         self, db: DatabaseManager
     ) -> None:
-        """duckdb and postgres deserialize TIMESTAMP columns back into real
-        datetime objects; sqlite3's driver returns the raw stored string
-        (no type adapter registered), so this only checks the
-        datetime-typed backends. sqlite's write-path stripping is covered
-        indirectly: it stores whatever _normalize_params() produces, and
-        callers that round-trip the value get back exactly what was stored.
+        """Every backend deserializes TIMESTAMP columns back into real
+        datetime objects and strips an aware param's tzinfo before storing.
         """
-        _skip_if_sqlite(
-            db, "sqlite3 returns TIMESTAMP columns as raw strings, not datetime"
-        )
-
         db.execute("CREATE TABLE t (ts TIMESTAMP)")
         aware = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
