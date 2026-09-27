@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import duckdb
@@ -502,6 +503,44 @@ class TestSqliteDatabaseManager:
 
         assert isinstance(db, SqliteDatabaseManager)
         assert get_database() is db
+
+    @pytest.mark.filterwarnings("error::DeprecationWarning")
+    def test_execute_with_datetime_param_does_not_use_deprecated_adapter(
+        self, tmp_path: Path
+    ) -> None:
+        """A `datetime` query parameter must reach sqlite3 through the
+        explicit adapter, not the deprecated (Python 3.12+) default one -
+        and must produce the exact same stored string that default adapter
+        did, for a value with and one without microseconds.
+        """
+        db_path = str(tmp_path / "test.sqlite3")
+        db = SqliteDatabaseManager(db_path)
+        with_micros = datetime.now(timezone.utc)
+        without_micros = datetime(2026, 1, 2, 3, 4, 5)
+
+        insert_sql = (
+            "INSERT INTO agent_events "
+            "(id, zulip_message_id, topic, sender_email, content, created_at, acked) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        db.execute(
+            insert_sql, ("evt1", 100, "topic", "a@b.com", "hi", with_micros, False)
+        )
+        db.execute(
+            insert_sql, ("evt2", 100, "topic", "a@b.com", "hi", without_micros, False)
+        )
+
+        conn = sqlite3.connect(db_path)
+        try:
+            stored = dict(
+                conn.execute(
+                    "SELECT id, created_at FROM agent_events ORDER BY id"
+                ).fetchall()
+            )
+        finally:
+            conn.close()
+        assert stored["evt1"] == with_micros.replace(tzinfo=None).isoformat(" ")
+        assert stored["evt2"] == without_micros.isoformat(" ")
 
 
 class TestPostgresDatabaseManager:
