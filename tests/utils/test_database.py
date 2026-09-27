@@ -511,18 +511,42 @@ class TestSqliteDatabaseManager:
         through to sqlite3's own default datetime adapter - Python 3.12
         deprecated it (removal-slated), and database_manager.py passes
         ``datetime.now(timezone.utc)`` straight through as a parameter on
-        essentially every write (see e.g. agent_profiles.updated_at).
+        essentially every write (see e.g. agent_profiles.updated_at). Checks
+        both that the deprecated path is avoided and that the replacement
+        adapter reproduces the exact same string the deprecated one did (for
+        a value with and one without microseconds), so a stored column stays
+        byte-identical across the fix - not just warning-free.
         """
-        db = SqliteDatabaseManager(str(tmp_path / "test.sqlite3"))
+        db_path = str(tmp_path / "test.sqlite3")
+        db = SqliteDatabaseManager(db_path)
+        with_micros = datetime.now(timezone.utc)
+        without_micros = datetime(2026, 1, 2, 3, 4, 5)
 
-        db.execute(
+        insert_sql = (
             "INSERT INTO agent_events "
             "(id, zulip_message_id, topic, sender_email, content, created_at, acked) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("evt1", 100, "topic", "a@b.com", "hi", datetime.now(timezone.utc), False),
+            "VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        db.execute(
+            insert_sql, ("evt1", 100, "topic", "a@b.com", "hi", with_micros, False)
+        )
+        db.execute(
+            insert_sql, ("evt2", 100, "topic", "a@b.com", "hi", without_micros, False)
         )
 
         assert not any("datetime adapter" in str(w.message) for w in recwarn.list)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            stored = dict(
+                conn.execute(
+                    "SELECT id, created_at FROM agent_events ORDER BY id"
+                ).fetchall()
+            )
+        finally:
+            conn.close()
+        assert stored["evt1"] == with_micros.replace(tzinfo=None).isoformat(" ")
+        assert stored["evt2"] == without_micros.isoformat(" ")
 
 
 class TestPostgresDatabaseManager:
