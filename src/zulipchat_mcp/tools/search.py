@@ -169,6 +169,65 @@ def _walk_messages_for_window(
     }
 
 
+def _parse_time_bounds(
+    last_hours: int | str | None,
+    last_days: int | str | None,
+    after_time: datetime | str | None,
+    before_time: datetime | str | None,
+) -> tuple[float | None, float | None]:
+    """Resolve the time-filter params into (cutoff_ts, before_ts) epoch seconds.
+
+    `last_hours`/`last_days`/`after_time` are mutually exclusive lower bounds,
+    checked in that priority order; `before_time` is independent.
+    """
+    cutoff_ts: float | None = None
+    before_ts: float | None = None
+
+    if last_hours:
+        hours = int(last_hours) if isinstance(last_hours, str) else last_hours
+        cutoff_ts = (datetime.now() - timedelta(hours=hours)).timestamp()
+    elif last_days:
+        days = int(last_days) if isinstance(last_days, str) else last_days
+        cutoff_ts = (datetime.now() - timedelta(days=days)).timestamp()
+    elif after_time:
+        cutoff = (
+            after_time
+            if isinstance(after_time, datetime)
+            else datetime.fromisoformat(str(after_time))
+        )
+        cutoff_ts = cutoff.timestamp()
+
+    if before_time:
+        bt = (
+            before_time
+            if isinstance(before_time, datetime)
+            else datetime.fromisoformat(str(before_time))
+        )
+        before_ts = bt.timestamp()
+
+    return cutoff_ts, before_ts
+
+
+def _format_message(msg: dict[str, Any]) -> dict[str, Any]:
+    """Shape a raw Zulip message into search_messages' response format."""
+    return {
+        "id": msg["id"],
+        "sender": msg["sender_full_name"],
+        "email": msg["sender_email"],
+        "timestamp": msg["timestamp"],
+        "content": (
+            msg["content"][:1000] + "..."
+            if len(msg["content"]) > 1000
+            else msg["content"]
+        ),
+        "type": msg["type"],
+        "stream": msg.get("display_recipient"),
+        "topic": msg.get("subject"),
+        "reactions": msg.get("reactions", []),
+        "flags": msg.get("flags", []),
+    }
+
+
 async def resolve_user_identifier(
     identifier: str, client: ZulipClientWrapper
 ) -> dict[str, Any]:
@@ -426,36 +485,9 @@ async def search_messages(
         # "Invalid anchor". Fetch recent messages via anchor="newest" instead
         # and filter by timestamp client-side, which works on any server
         # version.
-        cutoff_ts: float | None = None
-        before_ts: float | None = None
-
-        if last_hours or last_days or after_time:
-            # Calculate cutoff time
-            if last_hours:
-                hours = int(last_hours) if isinstance(last_hours, str) else last_hours
-                cutoff = datetime.now() - timedelta(hours=hours)
-            elif last_days:
-                days = int(last_days) if isinstance(last_days, str) else last_days
-                cutoff = datetime.now() - timedelta(days=days)
-            elif after_time:
-                cutoff = (
-                    after_time
-                    if isinstance(after_time, datetime)
-                    else datetime.fromisoformat(str(after_time))
-                )
-            else:
-                cutoff = None
-
-            if cutoff:
-                cutoff_ts = cutoff.timestamp()
-
-        if before_time:
-            bt = (
-                before_time
-                if isinstance(before_time, datetime)
-                else datetime.fromisoformat(str(before_time))
-            )
-            before_ts = bt.timestamp()
+        cutoff_ts, before_ts = _parse_time_bounds(
+            last_hours, last_days, after_time, before_time
+        )
 
         time_filtered: bool = cutoff_ts is not None or before_ts is not None
         if time_filtered:
@@ -533,26 +565,7 @@ async def search_messages(
                 messages = messages[-limit:]
 
             # Process messages for response
-            processed_messages = []
-            for msg in messages:
-                processed_messages.append(
-                    {
-                        "id": msg["id"],
-                        "sender": msg["sender_full_name"],
-                        "email": msg["sender_email"],
-                        "timestamp": msg["timestamp"],
-                        "content": (
-                            msg["content"][:1000] + "..."
-                            if len(msg["content"]) > 1000
-                            else msg["content"]
-                        ),
-                        "type": msg["type"],
-                        "stream": msg.get("display_recipient"),
-                        "topic": msg.get("subject"),
-                        "reactions": msg.get("reactions", []),
-                        "flags": msg.get("flags", []),
-                    }
-                )
+            processed_messages = [_format_message(msg) for msg in messages]
 
             return {
                 "status": "success",

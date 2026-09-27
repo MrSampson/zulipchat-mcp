@@ -15,6 +15,8 @@ from src.zulipchat_mcp.tools.search import (
     _WHOLE_WINDOW_PAGE_SIZE,
     AmbiguousUserError,
     UserNotFoundError,
+    _format_message,
+    _parse_time_bounds,
     _walk_messages_for_window,
     advanced_search,
     check_messages_match_narrow,
@@ -152,6 +154,48 @@ class TestSearchTools:
         # Let's try "Another"
         with pytest.raises(AmbiguousUserError):
             await resolve_user_identifier("Another", mock_client)
+
+    def test_format_message_truncates_long_content(self):
+        msg = _message(1, 1000.0)
+        msg["content"] = "x" * 1001
+        formatted = _format_message(msg)
+        assert formatted["content"] == "x" * 1000 + "..."
+
+    def test_format_message_keeps_short_content_untouched(self):
+        msg = _message(1, 1000.0)
+        msg["content"] = "x" * 1000
+        formatted = _format_message(msg)
+        assert formatted["content"] == "x" * 1000
+
+    def test_format_message_defaults_reactions_and_flags_to_empty(self):
+        formatted = _format_message(_message(1, 1000.0))
+        assert formatted["reactions"] == []
+        assert formatted["flags"] == []
+
+    def test_format_message_passes_through_reactions_and_flags(self):
+        msg = _message(1, 1000.0)
+        msg["reactions"] = [{"emoji_name": "thumbs_up"}]
+        msg["flags"] = ["read"]
+        formatted = _format_message(msg)
+        assert formatted["reactions"] == [{"emoji_name": "thumbs_up"}]
+        assert formatted["flags"] == ["read"]
+
+    def test_parse_time_bounds_accepts_string_last_hours(self):
+        cutoff_ts, before_ts = _parse_time_bounds("2", None, None, None)
+        expected = (datetime.now() - timedelta(hours=2)).timestamp()
+        assert cutoff_ts is not None
+        assert cutoff_ts == pytest.approx(expected, abs=2)
+        assert before_ts is None
+
+    def test_parse_time_bounds_accepts_string_last_days(self):
+        cutoff_ts, before_ts = _parse_time_bounds(None, "3", None, None)
+        expected = (datetime.now() - timedelta(days=3)).timestamp()
+        assert cutoff_ts is not None
+        assert cutoff_ts == pytest.approx(expected, abs=2)
+        assert before_ts is None
+
+    def test_parse_time_bounds_none_when_nothing_given(self):
+        assert _parse_time_bounds(None, None, None, None) == (None, None)
 
     @pytest.mark.asyncio
     async def test_search_messages_basic(self, mock_deps):
