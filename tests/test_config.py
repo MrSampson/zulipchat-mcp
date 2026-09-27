@@ -110,3 +110,33 @@ def test_database_config_postgres_allows_missing_password(
 
     assert config.config.database.postgres_password is None
     assert config.config.database.postgres_host == "db.internal"
+
+
+def test_database_config_retention_days_defaults_to_thirty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ZULIPCHAT_RETENTION_DAYS", raising=False)
+
+    config = ConfigManager()
+
+    assert config.config.database.retention_days == 30
+
+
+def test_database_config_reads_retention_days_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZULIPCHAT_RETENTION_DAYS", "7")
+
+    config = ConfigManager()
+
+    assert config.config.database.retention_days == 7
+
+
+def test_database_config_retention_days_falls_back_on_invalid_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZULIPCHAT_RETENTION_DAYS", "not-a-number")
+
+    config = ConfigManager()
+
+    assert config.config.database.retention_days == 30

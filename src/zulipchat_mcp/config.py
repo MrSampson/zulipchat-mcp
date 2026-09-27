@@ -21,8 +21,12 @@ except ImportError:
         pass
 
 
+from .utils.logging import get_logger
+
 if TYPE_CHECKING:
     from .core.client import ZulipClientWrapper
+
+logger = get_logger(__name__)
 
 try:
     from pathlib import Path
@@ -54,6 +58,9 @@ class DatabaseBackend(StrEnum):
     POSTGRES = "postgres"
 
 
+DEFAULT_RETENTION_DAYS = 30
+
+
 def _default_db_path(backend: DatabaseBackend) -> str:
     """DuckDB and SQLite each get their own default file, so switching
     DATABASE_BACKEND never silently points at the other backend's file.
@@ -74,6 +81,7 @@ class DatabaseConfig:
     postgres_db: str | None = None
     postgres_user: str | None = None
     postgres_password: str | None = None
+    retention_days: int = DEFAULT_RETENTION_DAYS
 
 
 @dataclass
@@ -232,7 +240,28 @@ class ConfigManager:
             postgres_db=dbname,
             postgres_user=user,
             postgres_password=self._env("POSTGRES_PASSWORD"),
+            retention_days=self._get_retention_days(),
         )
+
+    def _get_retention_days(self) -> int:
+        """Days to keep terminal-state rows in the event/request tables
+        (agent_events, session_events, agent_requests, user_input_requests,
+        tasks) before retention cleanup deletes them. Any value <= 0
+        disables cleanup entirely. Falls back to the default on an
+        unparseable value rather than failing startup over a non-critical
+        knob.
+        """
+        raw = self._env("ZULIPCHAT_RETENTION_DAYS")
+        if raw is None:
+            return DEFAULT_RETENTION_DAYS
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning(
+                f"Invalid ZULIPCHAT_RETENTION_DAYS={raw!r}; using default "
+                f"{DEFAULT_RETENTION_DAYS}"
+            )
+            return DEFAULT_RETENTION_DAYS
 
     def _get_debug(self) -> bool:
         """Get debug mode setting."""

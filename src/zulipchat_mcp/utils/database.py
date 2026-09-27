@@ -24,6 +24,7 @@ from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
 
 from ..config import DatabaseBackend, DatabaseConfig
+from .retention import run_retention_cleanup
 
 T = TypeVar("T")
 
@@ -555,6 +556,8 @@ def init_database(config: DatabaseConfig) -> DatabaseManager:
         )
     else:
         raise ValueError(f"Unsupported DATABASE_BACKEND: {backend}")
+
+    run_retention_cleanup(_db_manager, config.retention_days)
     return _db_manager
 
 

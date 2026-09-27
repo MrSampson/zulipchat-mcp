@@ -440,6 +440,27 @@ class TestDatabaseManager:
         with pytest.raises(RuntimeError, match="not initialized"):
             get_database()
 
+    def test_init_database_runs_retention_cleanup_with_configured_days(self, tmp_path):
+        """init_database() is the sole production entry point for every
+        backend, so it must actually invoke retention cleanup with the
+        configured window - the config knob only matters if something
+        wires it to the DELETE statements in utils/retention.py.
+        """
+        from src.zulipchat_mcp.config import DatabaseBackend, DatabaseConfig
+
+        with patch(
+            "src.zulipchat_mcp.utils.database.run_retention_cleanup"
+        ) as mock_cleanup:
+            db = init_database(
+                DatabaseConfig(
+                    backend=DatabaseBackend.DUCKDB,
+                    path=str(tmp_path / "test.db"),
+                    retention_days=7,
+                )
+            )
+
+        mock_cleanup.assert_called_once_with(db, 7)
+
     def test_make_engine_raises_actionable_error_when_duckdb_engine_missing(
         self, tmp_path, monkeypatch
     ):
