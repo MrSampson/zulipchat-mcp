@@ -17,6 +17,7 @@ from src.zulipchat_mcp.utils.retention import run_retention_cleanup
 
 OLD = datetime.now(timezone.utc) - timedelta(days=60)
 RECENT = datetime.now(timezone.utc) - timedelta(days=1)
+PAST_CEILING = datetime.now(timezone.utc) - timedelta(days=100)
 
 
 def _insert_agent_event(
@@ -273,6 +274,96 @@ class TestRunRetentionCleanup:
         run_retention_cleanup(db, retention_days=0)
 
         assert db.query("SELECT id FROM agent_events") == [("evt-1",)]
+
+    def test_stale_ceiling_deletes_pending_agent_request_past_ceiling(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_agent_request(db, "req-1", PAST_CEILING, status="pending")
+
+        run_retention_cleanup(db, retention_days=30, stale_ceiling_days=90)
+
+        assert db.query("SELECT request_id FROM agent_requests") == []
+
+    def test_stale_ceiling_keeps_pending_agent_request_within_ceiling(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_agent_request(db, "req-1", OLD, status="pending")
+
+        run_retention_cleanup(db, retention_days=30, stale_ceiling_days=90)
+
+        assert db.query("SELECT request_id FROM agent_requests") == [("req-1",)]
+
+    def test_stale_ceiling_deletes_pending_user_input_request_past_ceiling(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_user_input_request(db, "uir-1", PAST_CEILING, status="pending")
+
+        run_retention_cleanup(db, retention_days=30, stale_ceiling_days=90)
+
+        assert db.query("SELECT request_id FROM user_input_requests") == []
+
+    def test_stale_ceiling_keeps_pending_user_input_request_within_ceiling(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_user_input_request(db, "uir-1", OLD, status="pending")
+
+        run_retention_cleanup(db, retention_days=30, stale_ceiling_days=90)
+
+        assert db.query("SELECT request_id FROM user_input_requests") == [("uir-1",)]
+
+    def test_stale_ceiling_deletes_unacked_session_event_past_ceiling(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_session_event(db, "se-1", PAST_CEILING, acked=False)
+
+        run_retention_cleanup(db, retention_days=30, stale_ceiling_days=90)
+
+        assert db.query("SELECT id FROM session_events") == []
+
+    def test_stale_ceiling_keeps_unacked_session_event_within_ceiling(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_session_event(db, "se-1", OLD, acked=False)
+
+        run_retention_cleanup(db, retention_days=30, stale_ceiling_days=90)
+
+        assert db.query("SELECT id FROM session_events") == [("se-1",)]
+
+    def test_stale_ceiling_deletes_incomplete_task_past_ceiling(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_task(db, "task-1", PAST_CEILING, completed_at=None)
+
+        run_retention_cleanup(db, retention_days=30, stale_ceiling_days=90)
+
+        assert db.query("SELECT task_id FROM tasks") == []
+
+    def test_stale_ceiling_keeps_incomplete_task_within_ceiling(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_task(db, "task-1", OLD, completed_at=None)
+
+        run_retention_cleanup(db, retention_days=30, stale_ceiling_days=90)
+
+        assert db.query("SELECT task_id FROM tasks") == [("task-1",)]
+
+    def test_zero_stale_ceiling_days_disables_ceiling(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_agent_request(db, "req-1", PAST_CEILING, status="pending")
+
+        run_retention_cleanup(db, retention_days=30, stale_ceiling_days=0)
+
+        assert db.query("SELECT request_id FROM agent_requests") == [("req-1",)]
+
+    def test_stale_ceiling_defaults_to_disabled(self, db: DatabaseManager) -> None:
+        """Callers that don't pass stale_ceiling_days keep the pre-ceiling
+        behavior of retaining non-terminal rows regardless of age."""
+        _insert_agent_request(db, "req-1", PAST_CEILING, status="pending")
+
+        run_retention_cleanup(db, retention_days=30)
+
+        assert db.query("SELECT request_id FROM agent_requests") == [("req-1",)]
 
     def test_one_table_failure_does_not_block_cleanup_of_others(
         self, db: DatabaseManager

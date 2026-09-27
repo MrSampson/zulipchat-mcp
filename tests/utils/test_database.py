@@ -459,7 +459,7 @@ class TestDatabaseManager:
                 )
             )
 
-        mock_cleanup.assert_called_once_with(db, 7)
+        mock_cleanup.assert_called_once_with(db, 7, 90)
 
     def test_make_engine_raises_actionable_error_when_duckdb_engine_missing(
         self, tmp_path, monkeypatch
