@@ -17,18 +17,14 @@ regardless of age), so it's pruned by age alone.
 
 A row can also be stuck non-terminal forever through no fault of the
 retention rule: the process waiting on it can crash mid-wait, or nobody
-ever polls/answers it. The `stale_ceiling_days` cutoff bounds that - past
-this much older age, still-non-terminal rows are deleted regardless of
-their age-window position, on the theory that anything both in-flight and
-that old is abandoned rather than genuinely pending. For session_events,
-agent_requests, and user_input_requests this cutoff applies unconditionally
-(the same `created_at` column drives both the terminal-state check and the
-ceiling, so a row surviving to ceiling age is necessarily still
-non-terminal). tasks is the exception: its terminal check keys off
-`completed_at`, a different column from the ceiling's `started_at`, so the
-ceiling statement is gated on `completed_at IS NULL` - otherwise a
-long-running but completed task would be deleted for having started long
-ago, despite having finished normally.
+ever polls/answers it. The `stale_ceiling_days` cutoff bounds that: rows
+still non-terminal after this much longer age are treated as abandoned and
+deleted, independent of whatever `retention_days` is set to (including
+disabled, `retention_days <= 0`). Each ceiling statement is the complement
+of its table's terminal-state predicate - the same one the retention
+statement above it uses - so it only ever reaps non-terminal rows and
+never touches a row the retention statement would otherwise be trusted to
+keep.
 """
 
 from __future__ import annotations
@@ -52,17 +48,17 @@ _CLEANUP_STATEMENTS: tuple[tuple[str, str, str | None], ...] = (
     (
         "session_events",
         "DELETE FROM session_events WHERE acked = TRUE AND created_at < ?",
-        "DELETE FROM session_events WHERE created_at < ?",
+        "DELETE FROM session_events WHERE acked = FALSE AND created_at < ?",
     ),
     (
         "agent_requests",
         "DELETE FROM agent_requests WHERE status != 'pending' AND created_at < ?",
-        "DELETE FROM agent_requests WHERE created_at < ?",
+        "DELETE FROM agent_requests WHERE status = 'pending' AND created_at < ?",
     ),
     (
         "user_input_requests",
         "DELETE FROM user_input_requests WHERE status != 'pending' AND created_at < ?",
-        "DELETE FROM user_input_requests WHERE created_at < ?",
+        "DELETE FROM user_input_requests WHERE status = 'pending' AND created_at < ?",
     ),
     (
         "tasks",

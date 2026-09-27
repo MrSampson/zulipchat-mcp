@@ -367,6 +367,51 @@ class TestRunRetentionCleanup:
 
         assert db.query("SELECT request_id FROM agent_requests") == []
 
+    def test_stale_ceiling_keeps_answered_agent_request_when_retention_disabled(
+        self, db: DatabaseManager
+    ) -> None:
+        """retention_days=0 is documented as disabling terminal-state cleanup
+        entirely - the ceiling targets abandoned (non-terminal) rows, not
+        terminal ones, so it must not delete an answered row just because
+        it's old.
+        """
+        _insert_agent_request(db, "req-1", PAST_CEILING, status="answered")
+
+        run_retention_cleanup(db, retention_days=0, stale_ceiling_days=90)
+
+        assert db.query("SELECT request_id FROM agent_requests") == [("req-1",)]
+
+    def test_stale_ceiling_keeps_answered_user_input_request_when_retention_disabled(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_user_input_request(db, "uir-1", PAST_CEILING, status="answered")
+
+        run_retention_cleanup(db, retention_days=0, stale_ceiling_days=90)
+
+        assert db.query("SELECT request_id FROM user_input_requests") == [("uir-1",)]
+
+    def test_stale_ceiling_keeps_acked_session_event_when_retention_disabled(
+        self, db: DatabaseManager
+    ) -> None:
+        _insert_session_event(db, "se-1", PAST_CEILING, acked=True)
+
+        run_retention_cleanup(db, retention_days=0, stale_ceiling_days=90)
+
+        assert db.query("SELECT id FROM session_events") == [("se-1",)]
+
+    def test_stale_ceiling_deletes_answered_agent_request_past_ceiling_when_retention_shorter(
+        self, db: DatabaseManager
+    ) -> None:
+        """When retention_days < stale_ceiling_days (the normal case), a
+        terminal row past the ceiling was already deleted by the shorter
+        retention sweep - this pins that the two sweeps agree rather than
+        double-deleting or disagreeing."""
+        _insert_agent_request(db, "req-1", PAST_CEILING, status="answered")
+
+        run_retention_cleanup(db, retention_days=30, stale_ceiling_days=90)
+
+        assert db.query("SELECT request_id FROM agent_requests") == []
+
     def test_zero_stale_ceiling_days_disables_ceiling(
         self, db: DatabaseManager
     ) -> None:
@@ -424,7 +469,7 @@ class TestRunRetentionCleanup:
         def _flaky_execute(
             sql: str, params: list[Any] | tuple[Any, ...] | None = None
         ) -> None:
-            if "agent_requests" in sql and "status" in sql:
+            if "agent_requests" in sql and "!=" in sql:
                 raise RuntimeError("simulated failure")
             real_execute(sql, params)
 
