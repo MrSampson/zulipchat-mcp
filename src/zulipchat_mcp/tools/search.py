@@ -183,24 +183,19 @@ def _parse_time_bounds(
     cutoff_ts: float | None = None
     before_ts: float | None = None
 
-    if last_hours or last_days or after_time:
-        if last_hours:
-            hours = int(last_hours) if isinstance(last_hours, str) else last_hours
-            cutoff = datetime.now() - timedelta(hours=hours)
-        elif last_days:
-            days = int(last_days) if isinstance(last_days, str) else last_days
-            cutoff = datetime.now() - timedelta(days=days)
-        elif after_time:
-            cutoff = (
-                after_time
-                if isinstance(after_time, datetime)
-                else datetime.fromisoformat(str(after_time))
-            )
-        else:
-            cutoff = None
-
-        if cutoff:
-            cutoff_ts = cutoff.timestamp()
+    if last_hours:
+        hours = int(last_hours) if isinstance(last_hours, str) else last_hours
+        cutoff_ts = (datetime.now() - timedelta(hours=hours)).timestamp()
+    elif last_days:
+        days = int(last_days) if isinstance(last_days, str) else last_days
+        cutoff_ts = (datetime.now() - timedelta(days=days)).timestamp()
+    elif after_time:
+        cutoff = (
+            after_time
+            if isinstance(after_time, datetime)
+            else datetime.fromisoformat(str(after_time))
+        )
+        cutoff_ts = cutoff.timestamp()
 
     if before_time:
         bt = (
