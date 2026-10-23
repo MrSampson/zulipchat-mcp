@@ -168,6 +168,43 @@ jobs:
       - name: Type check with mypy
         run: uv run mypy src
 
+  # The container image runs on Python 3.15 and installs unlocked
+  # (`zulipchat-mcp[postgres]` resolved fresh from PyPI), not from uv.lock,
+  # and without duckdb or the dev tools. The matrix above tests the locked
+  # set, which has no 3.15 wheels for duckdb and others, so this job mirrors
+  # what ships. duckdb-dependent tests are skipped for the same reason.
+  test-image-runtime:
+    name: Test (Python 3.15, image-style install)
+    needs: [version-check, package-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Set up Python 3.15
+        run: uv python install 3.15
+
+      - name: Install package and test tools (unlocked, postgres extra only)
+        run: |
+          uv venv --python 3.15 .venv-image
+          uv pip install --python .venv-image/bin/python \
+            ".[postgres]" \
+            "pytest>=8.0" "pytest-asyncio>=0.24" "pytest-cov>=5.0" \
+            "pytest-benchmark>=4.0.0" "pytest-mock>=3.12.0"
+
+      - name: Run tests
+        run: |
+          .venv-image/bin/python -m pytest -q --no-cov \
+            -m "not slow and not integration" -k "not duckdb" \
+            --ignore=tests/utils/test_database.py \
+            --ignore=tests/utils/test_migrations.py \
+            --ignore=tests/utils/test_schema.py
+
   test-integration:
     name: Integration Tests (Postgres)
     needs: [version-check, package-smoke]
