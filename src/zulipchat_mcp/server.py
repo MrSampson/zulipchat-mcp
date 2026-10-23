@@ -218,6 +218,9 @@ def main() -> None:
     if args.transport == "http":
         from fastmcp.server.auth import MultiAuth, OIDCProxy
         from fastmcp.server.auth.auth import TokenVerifier
+        from fastmcp.server.auth.providers.introspection import (
+            IntrospectionTokenVerifier,
+        )
         from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
         verifiers: list[TokenVerifier] = []
@@ -252,13 +255,26 @@ def main() -> None:
                     " and ".join(missing),
                 )
             else:
+                # The upstream IdP's access tokens are opaque, not JWTs, so
+                # OIDCProxy's default JWKS verifier rejects every one of them.
+                # Introspect them instead. The required scopes live on the
+                # verifier (OIDCProxy rejects required_scopes alongside a
+                # custom token_verifier); valid_scopes keeps them advertised
+                # and requested upstream.
+                upstream_verifier = IntrospectionTokenVerifier(
+                    introspection_url=f"{args.oidc_issuer}/oauth/introspect",
+                    client_id=args.oidc_client_id,
+                    client_secret=args.oidc_client_secret,
+                    required_scopes=OIDC_REQUIRED_SCOPES,
+                )
                 oidc_server = OIDCProxy(
                     config_url=f"{args.oidc_issuer}/.well-known/openid-configuration",
                     client_id=args.oidc_client_id,
                     client_secret=args.oidc_client_secret,
                     issuer_url=args.public_url,
                     base_url=args.public_url,
-                    required_scopes=OIDC_REQUIRED_SCOPES,
+                    token_verifier=upstream_verifier,
+                    valid_scopes=OIDC_REQUIRED_SCOPES,
                 )
                 logger.info("HTTP transport: GitLab OAuth login enabled")
 

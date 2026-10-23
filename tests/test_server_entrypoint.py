@@ -272,8 +272,9 @@ def test_http_transport_with_oidc_configures_multiauth_server():
 
     # Without an explicit scope request, OAuthProxy omits the `scope`
     # parameter from the upstream authorize redirect entirely, and providers
-    # with no default_scopes fallback reject the request as invalid.
-    assert oidc_kwargs["required_scopes"] == ["openid", "profile", "email"]
+    # with no default_scopes fallback reject the request as invalid. The
+    # scopes ride on the custom token verifier (see the introspection test).
+    assert oidc_kwargs["valid_scopes"] == ["openid", "profile", "email"]
 
     # MultiAuth defaults its OWN required_scopes to server.required_scopes
     # when not given explicitly, which would turn the scope OIDCProxy needs
@@ -411,3 +412,59 @@ def test_http_transport_oidc_without_issuer_errors_and_skips_oidc():
     assert any("--oidc-issuer" in str(call) for call in logger.error.call_args_list)
     auth = mock_fastmcp.call_args.kwargs["auth"]
     assert auth is None
+
+
+def test_http_transport_with_oidc_verifies_opaque_upstream_token_by_introspection():
+    """GitLab's upstream access tokens are opaque, so they must be introspected, not JWKS-verified."""
+    cfg = MagicMock()
+    cfg.validate_config.return_value = True
+    mcp = MagicMock()
+
+    with (
+        patch("src.zulipchat_mcp.server.setup_structured_logging"),
+        patch("src.zulipchat_mcp.server.get_logger", return_value=MagicMock()),
+        patch("src.zulipchat_mcp.server.init_config_manager", return_value=cfg),
+        patch("src.zulipchat_mcp.server.init_database"),
+        patch("src.zulipchat_mcp.server.FastMCP", return_value=mcp),
+        patch("src.zulipchat_mcp.server.register_core_tools"),
+        patch(
+            "fastmcp.server.auth.OIDCProxy", return_value=MagicMock()
+        ) as mock_oidc_proxy,
+        patch(
+            "fastmcp.server.auth.providers.introspection.IntrospectionTokenVerifier"
+        ) as mock_verifier,
+        patch.object(
+            sys,
+            "argv",
+            [
+                "zulipchat-mcp",
+                "--transport",
+                "http",
+                "--oidc-client-id",
+                "test-client-id",
+                "--oidc-client-secret",
+                "test-secret",
+                "--oidc-issuer",
+                "https://gitlab.example.com",
+                "--public-url",
+                "https://your-mcp-server.example.com",
+            ],
+        ),
+    ):
+        server.main()
+
+    mock_verifier.assert_called_once()
+    verifier_kwargs = mock_verifier.call_args.kwargs
+    assert verifier_kwargs["introspection_url"] == (
+        "https://gitlab.example.com/oauth/introspect"
+    )
+    assert verifier_kwargs["client_id"] == "test-client-id"
+    assert verifier_kwargs["client_secret"] == "test-secret"
+    assert verifier_kwargs["required_scopes"] == ["openid", "profile", "email"]
+
+    # A custom token_verifier is mutually exclusive with required_scopes on
+    # OIDCProxy; the scopes ride on the verifier and valid_scopes instead.
+    oidc_kwargs = mock_oidc_proxy.call_args.kwargs
+    assert oidc_kwargs["token_verifier"] is mock_verifier.return_value
+    assert "required_scopes" not in oidc_kwargs
+    assert oidc_kwargs["valid_scopes"] == ["openid", "profile", "email"]
