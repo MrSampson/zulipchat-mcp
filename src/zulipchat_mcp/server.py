@@ -31,6 +31,11 @@ except ImportError:
     database_available = False
 
 from .utils.logging import get_logger, setup_structured_logging
+from .utils.oidc import (
+    INTROSPECTION_CACHE_TTL_SECONDS,
+    LoggingIntrospectionTokenVerifier,
+    resolve_introspection_url,
+)
 
 # Standard OIDC scopes needed to identify the logged-in user (sub/name/email
 # claims). Without an explicit scope request, OAuthProxy omits the `scope`
@@ -236,31 +241,73 @@ def main() -> None:
 
         oidc_server = None
         if args.oidc_client_id:
-            if not args.public_url or not args.oidc_issuer:
+            if (
+                not args.public_url
+                or not args.oidc_issuer
+                or not args.oidc_client_secret
+            ):
                 missing = [
                     name
                     for name, val in (
                         ("--public-url", args.public_url),
                         ("--oidc-issuer", args.oidc_issuer),
+                        ("--oidc-client-secret", args.oidc_client_secret),
                     )
                     if not val
                 ]
                 logger.error(
-                    "--oidc-client-id set without %s - OAuth requires both "
-                    "the issuer URL and this server's externally-reachable "
-                    "URL. OIDC login will NOT be enabled.",
+                    "--oidc-client-id set without %s - OAuth requires the "
+                    "issuer URL, this server's externally-reachable URL and "
+                    "the client secret. OIDC login will NOT be enabled.",
                     " and ".join(missing),
                 )
             else:
-                oidc_server = OIDCProxy(
-                    config_url=f"{args.oidc_issuer}/.well-known/openid-configuration",
-                    client_id=args.oidc_client_id,
-                    client_secret=args.oidc_client_secret,
-                    issuer_url=args.public_url,
-                    base_url=args.public_url,
-                    required_scopes=OIDC_REQUIRED_SCOPES,
-                )
-                logger.info("HTTP transport: GitLab OAuth login enabled")
+                introspection_url = resolve_introspection_url(args.oidc_issuer)
+                if introspection_url is None:
+                    logger.error(
+                        "OIDC issuer %s does not advertise an "
+                        "introspection_endpoint in its discovery document - "
+                        "its opaque access tokens cannot be verified. OIDC "
+                        "login will NOT be enabled.",
+                        args.oidc_issuer,
+                    )
+                else:
+                    # The upstream IdP's access tokens are opaque, not JWTs,
+                    # so OIDCProxy's default JWKS verifier rejects every one
+                    # of them. Introspect them instead. The required scopes
+                    # live on the verifier (OIDCProxy rejects required_scopes
+                    # alongside a custom token_verifier); OAuthProxy copies
+                    # them from it to request upstream when a client sends no
+                    # scope, and valid_scopes keeps them advertised.
+                    #
+                    # Two properties of the verified token to keep in mind:
+                    # it identifies the OAuth app (client_id), not the user -
+                    # the introspection response carries no `sub` - and a
+                    # client that authorizes with only some of these scopes
+                    # logs in but fails the scope floor on every call.
+                    upstream_verifier = LoggingIntrospectionTokenVerifier(
+                        introspection_url=introspection_url,
+                        client_id=args.oidc_client_id,
+                        client_secret=args.oidc_client_secret,
+                        required_scopes=OIDC_REQUIRED_SCOPES,
+                        cache_ttl_seconds=INTROSPECTION_CACHE_TTL_SECONDS,
+                    )
+                    oidc_server = OIDCProxy(
+                        config_url=(
+                            f"{args.oidc_issuer}/.well-known/openid-configuration"
+                        ),
+                        client_id=args.oidc_client_id,
+                        client_secret=args.oidc_client_secret,
+                        issuer_url=args.public_url,
+                        base_url=args.public_url,
+                        token_verifier=upstream_verifier,
+                        valid_scopes=OIDC_REQUIRED_SCOPES,
+                    )
+                    logger.info(
+                        "HTTP transport: OAuth login enabled, verifying "
+                        "upstream tokens via %s",
+                        introspection_url,
+                    )
 
         if oidc_server is not None or verifiers:
             # required_scopes=[]: MultiAuth otherwise defaults its OWN

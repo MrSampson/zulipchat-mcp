@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.zulipchat_mcp import server
+from src.zulipchat_mcp.utils.oidc import LoggingIntrospectionTokenVerifier
 
 
 @pytest.fixture
@@ -14,6 +15,9 @@ def mock_config_manager():
     cfg = MagicMock()
     cfg.validate_config.return_value = False
     return cfg
+
+
+INTROSPECTION_URL = "https://gitlab.example.com/oauth/introspect"
 
 
 def test_debug_flag_sets_debug_logging_level(mock_config_manager):
@@ -236,6 +240,10 @@ def test_http_transport_with_oidc_configures_multiauth_server():
         patch(
             "fastmcp.server.auth.OIDCProxy", return_value=fake_oidc_server
         ) as mock_oidc_proxy,
+        patch(
+            "src.zulipchat_mcp.server.resolve_introspection_url",
+            return_value=INTROSPECTION_URL,
+        ),
         patch.object(
             sys,
             "argv",
@@ -272,8 +280,9 @@ def test_http_transport_with_oidc_configures_multiauth_server():
 
     # Without an explicit scope request, OAuthProxy omits the `scope`
     # parameter from the upstream authorize redirect entirely, and providers
-    # with no default_scopes fallback reject the request as invalid.
-    assert oidc_kwargs["required_scopes"] == ["openid", "profile", "email"]
+    # with no default_scopes fallback reject the request as invalid. The
+    # scopes ride on the custom token verifier (see the introspection test).
+    assert oidc_kwargs["valid_scopes"] == ["openid", "profile", "email"]
 
     # MultiAuth defaults its OWN required_scopes to server.required_scopes
     # when not given explicitly, which would turn the scope OIDCProxy needs
@@ -298,8 +307,10 @@ def test_http_transport_with_oidc_and_service_token_does_not_scope_gate_service_
         patch("src.zulipchat_mcp.server.init_database"),
         patch("src.zulipchat_mcp.server.FastMCP", return_value=mcp) as mock_fastmcp,
         patch("src.zulipchat_mcp.server.register_core_tools"),
+        patch("fastmcp.server.auth.OIDCProxy", return_value=fake_oidc_server),
         patch(
-            "fastmcp.server.auth.OIDCProxy", return_value=fake_oidc_server
+            "src.zulipchat_mcp.server.resolve_introspection_url",
+            return_value=INTROSPECTION_URL,
         ),
         patch.object(
             sys,
@@ -411,3 +422,80 @@ def test_http_transport_oidc_without_issuer_errors_and_skips_oidc():
     assert any("--oidc-issuer" in str(call) for call in logger.error.call_args_list)
     auth = mock_fastmcp.call_args.kwargs["auth"]
     assert auth is None
+
+
+def _run_http_main_with_oidc(
+    extra_argv: list[str],
+    *,
+    introspection_url: str | None = INTROSPECTION_URL,
+) -> tuple[MagicMock, MagicMock, MagicMock]:
+    """Run main() with OIDC flags; return (FastMCP, OIDCProxy, logger) mocks."""
+    cfg = MagicMock()
+    cfg.validate_config.return_value = True
+    logger = MagicMock()
+
+    with (
+        patch("src.zulipchat_mcp.server.setup_structured_logging"),
+        patch("src.zulipchat_mcp.server.get_logger", return_value=logger),
+        patch("src.zulipchat_mcp.server.init_config_manager", return_value=cfg),
+        patch("src.zulipchat_mcp.server.init_database"),
+        patch("src.zulipchat_mcp.server.FastMCP", return_value=MagicMock()) as fastmcp,
+        patch("src.zulipchat_mcp.server.register_core_tools"),
+        patch(
+            "src.zulipchat_mcp.server.resolve_introspection_url",
+            return_value=introspection_url,
+        ),
+        patch("fastmcp.server.auth.OIDCProxy", return_value=MagicMock()) as proxy,
+        patch.object(
+            sys,
+            "argv",
+            [
+                "zulipchat-mcp",
+                "--transport",
+                "http",
+                "--oidc-client-id",
+                "test-client-id",
+                "--oidc-issuer",
+                "https://gitlab.example.com",
+                "--public-url",
+                "https://your-mcp-server.example.com",
+                *extra_argv,
+            ],
+        ),
+    ):
+        server.main()
+    return fastmcp, proxy, logger
+
+
+def test_http_transport_with_oidc_verifies_upstream_tokens_by_introspection():
+    """Opaque upstream tokens are introspected at the advertised endpoint, not JWKS-verified."""
+    _, proxy, _ = _run_http_main_with_oidc(["--oidc-client-secret", "test-secret"])
+
+    oidc_kwargs = proxy.call_args.kwargs
+    verifier = oidc_kwargs["token_verifier"]
+    assert isinstance(verifier, LoggingIntrospectionTokenVerifier)
+    assert verifier.introspection_url == INTROSPECTION_URL
+    assert verifier.required_scopes == ["openid", "profile", "email"]
+    # OIDCProxy raises if required_scopes accompanies a custom token_verifier.
+    assert "required_scopes" not in oidc_kwargs
+    assert oidc_kwargs["valid_scopes"] == ["openid", "profile", "email"]
+
+
+def test_http_transport_oidc_without_introspection_endpoint_skips_oidc():
+    """An issuer that advertises no introspection endpoint can't have its tokens verified."""
+    fastmcp, proxy, logger = _run_http_main_with_oidc(
+        ["--oidc-client-secret", "test-secret"], introspection_url=None
+    )
+
+    proxy.assert_not_called()
+    assert fastmcp.call_args.kwargs["auth"] is None
+    assert "introspection_endpoint" in logger.error.call_args.args[0]
+
+
+def test_http_transport_oidc_without_client_secret_errors_and_skips_oidc():
+    """A missing client secret is a logged misconfiguration, not a startup traceback."""
+    fastmcp, proxy, logger = _run_http_main_with_oidc([])
+
+    proxy.assert_not_called()
+    assert fastmcp.call_args.kwargs["auth"] is None
+    assert "--oidc-client-secret" in logger.error.call_args.args[1]
